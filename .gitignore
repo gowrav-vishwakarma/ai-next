@@ -58,3 +58,7 @@ coverage.xml
 # Logs and databases
 *.log
 *.sqlite
+
+
+# Checkpoints
+quantum_model_checkpoints/

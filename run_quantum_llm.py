@@ -2,18 +2,18 @@ import numpy as np
 from sample_qllm import EnhancedQuantumLLM, train_model
 
 def main():
-    # Configuration for a smaller test model with consistent dimensions
+    # Configuration
     config = {
-        'vocab_size': 30522,  # Adjust based on tokenizer's vocab size
-        'dim': 256,
+        'vocab_size': 30522,  # Match BERT tokenizer
+        'dim': 256,          # Smaller dimension for faster training
         'num_heads': 8,
         'num_layers': 4,
         'max_sequence_length': 512,
         'batch_size': 2,
-        'epochs': 1,
+        'epochs': 3,
         'learning_rate': 1e-4,
         'save_steps': 100,
-        'tokenizer_name': 'bert-base-uncased'  # Specify tokenizer name
+        'tokenizer_name': 'bert-base-uncased'
     }
     
     print("Initializing Quantum LLM...")

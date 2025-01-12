@@ -12,6 +12,33 @@ import torch
 import torch.nn as nn
 import itertools
 
+class ComplexMPS:
+    """Handle complex operations on MPS by splitting real and imaginary parts"""
+    def __init__(self, real, imag):
+        self.real = real.to("mps")
+        self.imag = imag.to("mps")
+    
+    @classmethod
+    def from_complex(cls, complex_tensor):
+        return cls(complex_tensor.real, complex_tensor.imag)
+    
+    def matmul(self, other):
+        # (a + bi)(c + di) = (ac - bd) + (ad + bc)i
+        real = torch.matmul(self.real, other.real) - torch.matmul(self.imag, other.imag)
+        imag = torch.matmul(self.real, other.imag) + torch.matmul(self.imag, other.real)
+        return ComplexMPS(real, imag)
+    
+    def to_complex(self):
+        return torch.complex(self.real, self.imag)
+
+    @staticmethod
+    def batch_matmul(tensors_real, tensors_imag, weights_real, weights_imag):
+        """Optimized batch matrix multiplication for complex numbers"""
+        # Compute all real and imaginary parts in parallel
+        real_part = torch.matmul(tensors_real, weights_real) - torch.matmul(tensors_imag, weights_imag)
+        imag_part = torch.matmul(tensors_real, weights_imag) + torch.matmul(tensors_imag, weights_real)
+        return real_part, imag_part
+
 class EnhancedQuantumTokenizer:
     """Enhanced tokenizer using Hugging Face tokenizers and quantum encoding"""
     def __init__(self, max_sequence_length=2048, tokenizer_name="bert-base-uncased"):
@@ -166,50 +193,49 @@ class EnhancedQuantumAttention(nn.Module):
         return pattern
     
     def _process_scale(self, Q, K, V, pattern, mask=None):
-        """Process attention at a specific scale"""
-        B, H, L, D = Q.shape  # Batch, Heads, Length, Head_dim
+        """Optimized attention computation"""
+        B, H, L, D = Q.shape
         
-        # Reshape pattern to match Q and K shapes
-        pattern = pattern[:H, :L, :]  # [heads, seq_len, head_dim]
-        pattern = pattern.unsqueeze(0)  # [1, heads, seq_len, head_dim]
-        pattern = pattern.expand(B, -1, -1, -1)  # [batch, heads, seq_len, head_dim]
+        # Split into real and imaginary parts once
+        Q_real, Q_imag = Q.real, Q.imag  # [B, H, L, D]
+        K_real, K_imag = K.real, K.imag  # [B, H, L, D]
+        V_real, V_imag = V.real, V.imag  # [B, H, L, D]
         
-        # Apply interference pattern
-        Q = Q * pattern
-        K = K * pattern
+        # Reshape inputs for batch matmul
+        Q_real = Q_real.reshape(B * H, L, D)
+        Q_imag = Q_imag.reshape(B * H, L, D)
+        K_real = K_real.reshape(B * H, L, D)
+        K_imag = K_imag.reshape(B * H, L, D)
         
-        # Split into real and imaginary parts
-        Q_real, Q_imag = Q.real, Q.imag
-        K_real, K_imag = K.real, K.imag
+        # Compute attention scores in parallel
+        # [B*H, L, D] x [B*H, D, L] -> [B*H, L, L]
+        scores_real = torch.bmm(Q_real, K_real.transpose(1, 2)) - torch.bmm(Q_imag, K_imag.transpose(1, 2))
+        scores_imag = torch.bmm(Q_real, K_imag.transpose(1, 2)) + torch.bmm(Q_imag, K_real.transpose(1, 2))
         
-        # Compute attention scores with complex multiplication
-        # (a + bi)(c + di) = (ac - bd) + (ad + bc)i
-        K_t_real = K_real.transpose(-2, -1)
-        K_t_imag = K_imag.transpose(-2, -1)
-        
-        scores_real = torch.matmul(Q_real, K_t_real) - torch.matmul(Q_imag, K_t_imag)
-        scores_imag = torch.matmul(Q_real, K_t_imag) + torch.matmul(Q_imag, K_t_real)
-        
-        # Compute magnitude for attention scores
-        scores_magnitude = torch.sqrt(scores_real**2 + scores_imag**2) / math.sqrt(D)
+        # Compute magnitudes [B*H, L, L]
+        scores_magnitude = torch.sqrt(scores_real**2 + scores_imag**2)
+        scores_magnitude = scores_magnitude.reshape(B, H, L, L) / math.sqrt(D)
         
         if mask is not None:
             scores_magnitude = scores_magnitude.masked_fill(mask == 0, float('-inf'))
         
-        # Apply softmax to magnitudes
+        # Compute attention weights [B, H, L, L]
         attention_weights = torch.softmax(scores_magnitude, dim=-1)
         
-        # Split V into real and imaginary parts
-        V_real, V_imag = V.real, V.imag
+        # Reshape attention weights and values for batch matmul
+        attention_weights = attention_weights.reshape(B * H, L, L)
+        V_real = V_real.reshape(B * H, L, D)
+        V_imag = V_imag.reshape(B * H, L, D)
         
-        # Apply attention weights to both real and imaginary parts
-        output_real = torch.matmul(attention_weights, V_real)
-        output_imag = torch.matmul(attention_weights, V_imag)
+        # Apply attention in parallel [B*H, L, L] x [B*H, L, D] -> [B*H, L, D]
+        output_real = torch.bmm(attention_weights, V_real)
+        output_imag = torch.bmm(attention_weights, V_imag)
         
-        # Combine back into complex tensor
-        output = torch.complex(output_real, output_imag)
+        # Reshape output back to [B, H, L, D]
+        output_real = output_real.reshape(B, H, L, D)
+        output_imag = output_imag.reshape(B, H, L, D)
         
-        return output
+        return torch.complex(output_real, output_imag)
     
     def forward(self, Q, K, V, mask=None):
         """Forward pass with quantum interference"""
@@ -356,43 +382,48 @@ class EnhancedQuantumOptimizer:
     
     def step(self, model, loss):
         """Update parameters using quantum-inspired optimization"""
+        def stabilize_complex(tensor, eps=1e-8):
+            magnitude = torch.sqrt(tensor.real**2 + tensor.imag**2)
+            # Clip extremely small magnitudes
+            magnitude = torch.clamp(magnitude, min=eps)
+            phase = torch.atan2(tensor.imag.cpu(), tensor.real.cpu()).to("mps")
+            return torch.complex(magnitude * torch.cos(phase), magnitude * torch.sin(phase))
+
         self.step_count += 1
-        
-        # Get model parameters directly
         params = {
             'token_embeddings': model.token_embeddings,
             'position_embeddings': model.position_embeddings
         }
         
-        # Add attention layer parameters
-        for i, layer in enumerate(model.attention_layers):
-            params[f'attention_layer_{i}'] = layer
-        
-        # Add universal pattern parameters
-        params['universal_patterns'] = model.universal_patterns
-        
-        # Compute gradients
         grads = self._compute_quantum_gradients(model, loss, params)
         
-        # Update parameters
         for name, param in params.items():
             if isinstance(param, torch.Tensor):
                 grad = grads[name]
                 
-                # Update momentum terms (maintain complex type)
-                self.m[name] = self.beta1 * self.m[name] + (1 - self.beta1) * grad
-                self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * torch.abs(grad)**2
+                # Stabilize gradients
+                grad = stabilize_complex(grad)
                 
-                # Bias correction
-                m_hat = self.m[name] / (1 - self.beta1**self.step_count)
+                # Update momentum terms with stabilization
+                self.m[name] = stabilize_complex(self.beta1 * self.m[name] + (1 - self.beta1) * grad)
+                self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * (grad.real**2 + grad.imag**2)
+                
+                # Bias correction with stabilization
+                m_hat = stabilize_complex(self.m[name] / (1 - self.beta1**self.step_count))
                 v_hat = self.v[name] / (1 - self.beta2**self.step_count)
                 
-                # Quantum-inspired update (keep complex type)
-                phase = torch.angle(m_hat + 1j * v_hat)
-                update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8) * torch.exp(1j * phase)
+                # Compute update with gradient clipping
+                update = self.learning_rate * m_hat / (torch.sqrt(v_hat + 1e-8))
+                update_magnitude = torch.sqrt(update.real**2 + update.imag**2)
+                max_update = 0.1  # Maximum allowed update magnitude
                 
-                # Update parameter (maintain complex type)
-                param -= update
+                if torch.any(update_magnitude > max_update):
+                    scale = max_update / (update_magnitude + 1e-8)
+                    scale = torch.minimum(torch.ones_like(scale), scale)
+                    update = torch.complex(update.real * scale, update.imag * scale)
+                
+                # Update parameter with stabilization
+                param.data = stabilize_complex(param.data - update)
             
             elif isinstance(param, EnhancedQuantumAttention):
                 # Update attention layer parameters
@@ -401,19 +432,16 @@ class EnhancedQuantumOptimizer:
                         name = f'{name}_expert_{aspect}'
                         grad = grads[name]
                         
-                        # Update momentum terms (maintain complex type)
+                        # Update momentum terms
                         self.m[name] = self.beta1 * self.m[name] + (1 - self.beta1) * grad
-                        self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * torch.abs(grad)**2
+                        self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * (grad.real**2 + grad.imag**2)
                         
                         # Bias correction
                         m_hat = self.m[name] / (1 - self.beta1**self.step_count)
                         v_hat = self.v[name] / (1 - self.beta2**self.step_count)
                         
-                        # Quantum-inspired update (keep complex type)
-                        phase = torch.angle(m_hat + 1j * v_hat)
-                        update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8) * torch.exp(1j * phase)
-                        
-                        # Update parameter (maintain complex type)
+                        # Update parameter
+                        update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8)
                         pattern -= update
             
             elif isinstance(param, EnhancedUniversalPatterns):
@@ -422,37 +450,30 @@ class EnhancedQuantumOptimizer:
                     name = f'{name}_{pattern_name}'
                     grad = grads[name]
                     
-                    # Update momentum terms (maintain complex type)
+                    # Update momentum terms
                     self.m[name] = self.beta1 * self.m[name] + (1 - self.beta1) * grad
-                    self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * torch.abs(grad)**2
+                    self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * (grad.real**2 + grad.imag**2)
                     
                     # Bias correction
                     m_hat = self.m[name] / (1 - self.beta1**self.step_count)
                     v_hat = self.v[name] / (1 - self.beta2**self.step_count)
                     
-                    # Quantum-inspired update (keep complex type)
-                    phase = torch.angle(m_hat + 1j * v_hat)
-                    update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8) * torch.exp(1j * phase)
-                    
-                    # Update parameter (maintain complex type)
+                    # Update parameter
+                    update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8)
                     pattern -= update
     
     def _compute_quantum_gradients(self, model, loss, params):
-        """Compute gradients using quantum-inspired methods"""
+        """Efficient gradient computation using MPS-supported operations"""
         grads = {}
-        eps = 1e-8
-        max_grad_norm = 1.0
+        eps = 1e-6  # Increased epsilon for better stability
+        max_grad_norm = 0.1  # Reduced for stability
+        batch_size = 32  # Smaller batch size for stability
 
-        def handle_nan_complex(x):
-            """Handle NaN values in complex tensors"""
-            real = x.real
-            imag = x.imag
-            
-            # Handle NaN in real and imaginary parts separately
-            real = torch.where(torch.isnan(real), torch.zeros_like(real), real)
-            imag = torch.where(torch.isnan(imag), torch.zeros_like(imag), imag)
-            
-            return torch.complex(real, imag)
+        def stabilize_value(value):
+            """Stabilize complex value computation"""
+            if torch.isnan(value) or torch.isinf(value):
+                return torch.zeros_like(value)
+            return value
 
         for name, param in params.items():
             print(f"Computing gradient for: {name}")
@@ -460,105 +481,84 @@ class EnhancedQuantumOptimizer:
                 grad = torch.zeros_like(param, dtype=torch.complex64, device="mps")
 
                 if param.dtype == torch.complex64:
-                    # Sample a subset of indices for efficiency
-                    total_elements = np.prod(param.shape)
-                    sample_size = min(1000, total_elements)
+                    # Sample fewer indices for stability
+                    num_rows = param.shape[0]
+                    sample_size = min(100, num_rows)  # Reduced sample size
+                    indices = torch.randperm(num_rows, device="mps")[:sample_size]
                     
-                    # Generate random indices
-                    shape_list = list(param.shape)
-                    indices = []
-                    for _ in range(sample_size):
-                        idx = []
-                        for dim_size in shape_list:
-                            rand_idx = torch.randint(0, dim_size, (1,), device="mps")[0].item()
-                            idx.append(rand_idx)
-                        indices.append(tuple(idx))
-                    
-                    for idx in indices:
-                        print(f"  Index: {idx}")
-                        try:
-                            with torch.no_grad():
-                                param_plus = param.clone()
-                                param_plus[idx] += eps
-                                param_minus = param.clone()
-                                param_minus[idx] -= eps
-
-                                if name == 'token_embeddings':
-                                    temp = model.token_embeddings.data.clone()
-                                    
-                                    model.token_embeddings.data = param_plus
-                                    loss_plus = handle_nan_complex(model.forward(model.last_input).mean())
-                                    
-                                    model.token_embeddings.data = param_minus
-                                    loss_minus = handle_nan_complex(model.forward(model.last_input).mean())
-                                    
-                                    model.token_embeddings.data = temp
-
-                                elif name == 'position_embeddings':
-                                    temp = model.position_embeddings.data.clone()
-                                    
-                                    model.position_embeddings.data = param_plus
-                                    loss_plus = handle_nan_complex(model.forward(model.last_input).mean())
-                                    
-                                    model.position_embeddings.data = param_minus
-                                    loss_minus = handle_nan_complex(model.forward(model.last_input).mean())
-                                    
-                                    model.position_embeddings.data = temp
-
-                                else:
-                                    loss_plus = loss_minus = loss
-
-                                # Compute gradient with stability checks
-                                grad_value = (loss_plus - loss_minus) / (2 * eps)
+                    # Process in smaller batches
+                    for batch_start in range(0, len(indices), batch_size):
+                        batch_end = min(batch_start + batch_size, len(indices))
+                        batch_indices = indices[batch_start:batch_end]
+                        
+                        with torch.no_grad():
+                            original_values = param[batch_indices].clone()
+                            
+                            if name == 'token_embeddings':
+                                # Compute gradients with stability checks
+                                param.data[batch_indices] += eps
+                                loss_plus = stabilize_value(model.forward(model.last_input).mean())
                                 
-                                # Handle instabilities
-                                grad_value = handle_nan_complex(grad_value)
+                                param.data[batch_indices] -= 2 * eps
+                                loss_minus = stabilize_value(model.forward(model.last_input).mean())
                                 
-                                # Clip gradient norm using magnitude
-                                grad_norm = torch.abs(grad_value)
-                                if grad_norm > max_grad_norm:
-                                    scale = max_grad_norm / grad_norm
-                                    grad_value = torch.complex(
-                                        grad_value.real * scale,
-                                        grad_value.imag * scale
-                                    )
+                                param.data[batch_indices] = original_values
                                 
-                                grad[idx] = grad_value
-                                print(f"    grad[{idx}]: {grad[idx]}")
+                                # Compute stable gradients
+                                grad_value = stabilize_value((loss_plus - loss_minus) / (2 * eps))
+                                grad[batch_indices] = grad_value.view(-1, 1) * torch.ones_like(param[batch_indices])
                                 
-                        except Exception as e:
-                            print(f"    Error computing gradient at {idx}: {str(e)}")
-                            grad[idx] = torch.zeros_like(param[idx])
+                            elif name == 'position_embeddings':
+                                # Similar stabilized computation for position embeddings
+                                param.data[batch_indices] += eps
+                                loss_plus = stabilize_value(model.forward(model.last_input).mean())
+                                
+                                param.data[batch_indices] -= 2 * eps
+                                loss_minus = stabilize_value(model.forward(model.last_input).mean())
+                                
+                                param.data[batch_indices] = original_values
+                                
+                                grad_value = stabilize_value((loss_plus - loss_minus) / (2 * eps))
+                                grad[batch_indices] = grad_value.view(-1, 1) * torch.ones_like(param[batch_indices])
 
-                    # Scale gradients based on sampling
-                    grad = grad * (total_elements / sample_size)
-
-                    # Clip full gradient norm using magnitude
+                    # Scale and clip gradients
+                    grad = grad * (num_rows / sample_size)
                     grad_norm = torch.sqrt(torch.sum(torch.abs(grad)**2))
                     if grad_norm > max_grad_norm:
-                        scale = max_grad_norm / grad_norm
-                        grad = torch.complex(grad.real * scale, grad.imag * scale)
+                        grad = grad * (max_grad_norm / grad_norm)
 
                 grads[name] = grad
-                print(f"  Grad norm for {name}: {torch.sqrt(torch.sum(torch.abs(grad)**2))}")
 
         return grads
 
     def _check_parameter_health(self, param, name):
         """Check parameter health and report statistics"""
         with torch.no_grad():
-            norm = torch.norm(param)
-            mean = torch.mean(torch.abs(param))
-            max_val = torch.max(torch.abs(param))
-            has_nan = torch.isnan(param).any()
-            has_inf = torch.isinf(param).any()
+            # Compute statistics using real and imaginary parts
+            real = param.real
+            imag = param.imag
+            magnitude = torch.sqrt(real**2 + imag**2)
+            
+            # Compute statistics on magnitude
+            norm = torch.sqrt(torch.sum(magnitude**2))
+            mean = torch.mean(magnitude)
+            max_val = torch.max(magnitude)
+            has_nan = torch.isnan(magnitude).any()
+            has_inf = torch.isinf(magnitude).any()
             
             print(f"Parameter {name} stats:")
-            print(f"  Norm: {norm}")
-            print(f"  Mean abs: {mean}")
-            print(f"  Max abs: {max_val}")
+            print(f"  Magnitude norm: {norm}")
+            print(f"  Magnitude mean: {mean}")
+            print(f"  Magnitude max: {max_val}")
             print(f"  Has NaN: {has_nan}")
             print(f"  Has Inf: {has_inf}")
+            
+            # Additional phase statistics
+            phase = torch.atan2(imag.cpu(), real.cpu()).to("mps")
+            phase_mean = torch.mean(torch.abs(phase))
+            phase_std = torch.std(phase)
+            print(f"  Phase mean abs: {phase_mean}")
+            print(f"  Phase std: {phase_std}")
             
             return not (has_nan or has_inf)
 
@@ -764,43 +764,90 @@ class EnhancedQuantumLLM(nn.Module):
     
     def generate(self, prompt, max_length=100, temperature=0.8):
         """Generate text using the model"""
+        def safe_normalize(x, dim=-1, eps=1e-8):
+            """Safely normalize vector to unit length."""
+            x_norm = torch.sqrt((x * x).sum(dim=dim, keepdim=True)) + eps
+            return x / x_norm
+
+        def get_next_token_probs(logits, temp=1.0):
+            """Get stable probability distribution for next token."""
+            # Get magnitudes of complex logits
+            magnitudes = torch.sqrt(logits.real**2 + logits.imag**2)
+            
+            # Apply temperature and subtract max for stability
+            scaled_magnitudes = magnitudes / temp
+            scaled_magnitudes = scaled_magnitudes - scaled_magnitudes.max()
+            
+            # Compute stable softmax
+            exp_magnitudes = torch.exp(scaled_magnitudes)
+            probs = exp_magnitudes / (exp_magnitudes.sum() + 1e-10)
+            
+            # Ensure valid probability distribution
+            probs = torch.nan_to_num(probs, 0.0)
+            if torch.sum(probs) < 1e-10:
+                # If all probs are too small, use uniform distribution
+                probs = torch.ones_like(probs) / probs.shape[0]
+            else:
+                probs = safe_normalize(probs, dim=-1)
+            
+            return probs
+
         # Encode prompt
         input_ids = self.tokenizer.encode(prompt)
-        input_ids = torch.tensor(input_ids).unsqueeze(0)
+        input_ids = torch.tensor(input_ids, device="mps").unsqueeze(0)
+        generated = list(input_ids[0].cpu().numpy())
         
-        generated = list(input_ids[0])
-        
-        for _ in range(max_length):
+        # Generation loop
+        for i in range(max_length):
             # Get predictions
             if len(generated) > self.config['max_sequence_length']:
                 context = generated[-self.config['max_sequence_length']:]
             else:
                 context = generated
             
-            input_ids = torch.tensor(context).unsqueeze(0)
-            logits = self.forward(input_ids, training=False)
-            next_token_logits = logits[0, -1]
-            
-            # Apply temperature and quantum sampling
-            scaled_logits = next_token_logits / temperature
-            probs = quantum_softmax(scaled_logits)
-            
-            # Ensure probabilities are real and normalized
-            probs = torch.abs(probs)  # Take the magnitude to get real probabilities
-            probs /= torch.sum(probs)  # Normalize to ensure they sum to 1
-            
-            # Quantum-inspired sampling
-            phase = torch.angle(probs + 1j * torch.roll(probs, 1))
-            interference = torch.abs(torch.exp(1j * phase))
-            probs = interference / torch.sum(interference)
-            
-            next_token = torch.multinomial(probs, 1)
-            
-            if next_token == self.tokenizer.vocab['<EOS>']:
-                break
-            
-            generated.append(next_token)
+            # Forward pass
+            with torch.no_grad():
+                input_ids = torch.tensor(context, device="mps").unsqueeze(0)
+                logits = self.forward(input_ids, training=False)
+                next_token_logits = logits[0, -1]
+                
+                # Get probability distribution
+                probs = get_next_token_probs(next_token_logits, temp=temperature)
+                
+                # Sample next token with fallbacks
+                try:
+                    # Try multinomial sampling
+                    next_token = torch.multinomial(probs, 1).item()
+                except RuntimeError:
+                    try:
+                        # Fallback 1: Try with re-normalized probabilities
+                        probs = safe_normalize(torch.abs(probs))
+                        next_token = torch.multinomial(probs, 1).item()
+                    except RuntimeError:
+                        # Fallback 2: Use argmax
+                        print("Warning: Falling back to argmax sampling")
+                        next_token = torch.argmax(probs).item()
+                
+                # Debug info for first token
+                if i == 0:
+                    print("\nGeneration debugging:")
+                    print(f"Probability sum: {probs.sum().item():.6f}")
+                    print(f"Max probability: {probs.max().item():.6f}")
+                    print(f"Number of non-zero probs: {(probs > 0).sum().item()}")
+                    top_k = 5
+                    top_probs, top_indices = torch.topk(probs, top_k)
+                    print("\nTop {} tokens:".format(top_k))
+                    for prob, idx in zip(top_probs.cpu().numpy(), top_indices.cpu().numpy()):
+                        token = self.tokenizer.decode([idx])
+                        print(f"Token: {token}, Probability: {prob:.6f}")
+                
+                # Stop if EOS token or probability is degenerate
+                if next_token == self.tokenizer.vocab.get('<EOS>', -1) or probs.max() > 0.9:
+                    break
+                
+                generated.append(next_token)
         
+        # Decode and return generated text
         return self.tokenizer.decode(generated)
 
 def train_model(model, train_data_path, output_dir, config):
@@ -889,9 +936,15 @@ def train_model(model, train_data_path, output_dir, config):
     print("Training completed!")
 
 def compute_loss(logits, targets):
-    """Compute cross entropy loss with quantum phase alignment"""
-    # Ensure inputs are on the correct device
-    logits = logits.to("mps")
+    """Compute cross entropy loss with quantum phase alignment and stabilization"""
+    def stabilize_complex(tensor, eps=1e-8):
+        magnitude = torch.sqrt(tensor.real**2 + tensor.imag**2)
+        magnitude = torch.clamp(magnitude, min=eps)
+        phase = torch.atan2(tensor.imag.cpu(), tensor.real.cpu()).to("mps")
+        return torch.complex(magnitude * torch.cos(phase), magnitude * torch.sin(phase))
+    
+    # Ensure inputs are on the correct device and stabilized
+    logits = stabilize_complex(logits.to("mps"))
     targets = targets.to("mps")
     
     # Flatten logits and targets
@@ -927,26 +980,25 @@ def compute_loss(logits, targets):
     return loss
 
 def quantum_softmax(logits):
-    """Apply quantum-inspired softmax with phase alignment, stabilization, and optional clipping"""
-    # Split complex tensor into real and imaginary parts
+    """Apply quantum-inspired softmax with enhanced stability"""
+    def safe_normalize(x, dim=-1, eps=1e-8):
+        x_norm = torch.sqrt((x * x).sum(dim=dim, keepdim=True)) + eps
+        return x / x_norm
+    
+    # Get real and imaginary parts
     real = logits.real
     imag = logits.imag
     
-    # Compute magnitudes using real and imaginary parts
-    magnitudes = torch.sqrt(real**2 + imag**2)
-    phases = torch.atan2(imag.cpu(), real.cpu()).to("mps")  # Handle phase calculation
+    # Compute magnitudes with stability
+    magnitudes = torch.sqrt(real**2 + imag**2 + 1e-8)
+    phases = torch.atan2(imag.cpu(), real.cpu()).to("mps")
     
-    # Stabilize by subtracting the maximum magnitude
-    magnitudes = magnitudes - torch.max(magnitudes, dim=-1, keepdim=True)[0]
+    # Stable softmax computation
+    max_mag = torch.max(magnitudes)
+    exp_mags = torch.exp(magnitudes - max_mag)
+    probs = safe_normalize(exp_mags)
     
-    # Optional: Clip magnitudes to a reasonable range
-    magnitudes = torch.clamp(magnitudes, -10, 10)
-    
-    # Apply softmax to magnitudes
-    exp_mags = torch.exp(magnitudes)
-    probs = exp_mags / torch.sum(exp_mags, dim=-1, keepdim=True)
-    
-    # Recombine with phases for quantum interference
+    # Combine with phases
     real_probs = probs * torch.cos(phases)
     imag_probs = probs * torch.sin(phases)
     
