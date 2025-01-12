@@ -62,3 +62,4 @@ coverage.xml
 
 # Checkpoints
 quantum_model_checkpoints/
+*.pt
