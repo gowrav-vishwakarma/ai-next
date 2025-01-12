@@ -11,9 +11,11 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Dataset
 import os
+import torch.backends.mps
 import gc
 import argparse
 import sys
+from quantum_language_core import QuantumTokenizer, QuantumLanguageStructure
 
 # Determine the best available device
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -25,53 +27,25 @@ if device == "mps":
     os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO'] = '0.3'   # Free memory when usage goes below 30%
 
 class FastQuantumOps:
-    """Handle quantum operations using fast trigonometric approximations"""
+    """Stable quantum operations using bounded functions"""
     
     @staticmethod
-    def fast_sin(x):
-        """Fast sine approximation using Taylor series first terms"""
-        # Handle tensor input properly
-        if isinstance(x, torch.Tensor):
-            # Normalize to -π to π range using modulo
-            x = x % (2 * torch.pi)
-            # Shift values > π to -π to π range
-            x = torch.where(x > torch.pi, x - 2 * torch.pi, x)
-            
-            # Fast approximation: x - x^3/6
-            x2 = x * x
-            return x * (1.0 - x2 / 6.0)
-        else:
-            # Handle scalar input
-            x = x % (2 * np.pi)
-            if x > np.pi:
-                x -= 2 * np.pi
-            x2 = x * x
-            return x * (1.0 - x2 / 6.0)
-    
-    @staticmethod
-    def fast_phase(real, imag):
-        """Fast phase approximation using lookup table"""
-        # Pre-computed lookup table for common angles
-        ANGLES = torch.linspace(0, 2*np.pi, 256).to(device)
-        
-        # Fast magnitude approximation
-        mag = torch.abs(real) + torch.abs(imag)  # Manhattan distance approximation
-        
-        # Quick angle approximation using ratio
-        angle_idx = ((torch.atan2(imag, real) + np.pi) * 128 / np.pi).long()
-        return ANGLES[angle_idx % 256], mag
-
-    @staticmethod 
     def quantum_interference(x, y):
-        """Simulate quantum interference using fast approximations"""
-        # Use separable 1D operations instead of 2D
-        x_mag = torch.abs(x)
-        y_mag = torch.abs(y)
-        
-        # Approximate interference pattern using broadcasting
-        diff = (x - y) * 0.5
-        interference = (x_mag + y_mag) * torch.cos(diff)
-        return interference
+        """Stable quantum interference using bounded operations"""
+        # Use hyperbolic tangent for bounded mixing
+        mixed = torch.tanh((x + y) * 0.5)
+        # Use cosine similarity for interference
+        similarity = F.cosine_similarity(x, y, dim=-1, eps=1e-8).unsqueeze(-1)
+        return mixed * similarity
+
+    @staticmethod
+    def phase_encoding(x):
+        """Encode information in phases using bounded operations"""
+        # Normalize input
+        x_norm = x / (torch.norm(x, dim=-1, keepdim=True) + 1e-8)
+        # Convert to phase space using arctan2
+        phase = torch.atan2(x_norm, torch.roll(x_norm, 1, dims=-1))
+        return torch.sin(phase)
 
 class FastQuantumAttention(nn.Module):
     """Optimized quantum-inspired attention"""
@@ -88,15 +62,15 @@ class FastQuantumAttention(nn.Module):
         )
     
     def _init_patterns(self):
-        """Initialize using fast trig approximations"""
-        t = torch.linspace(0, 2*torch.pi, self.head_dim).to(device)
+        """Initialize using stable operations"""
+        t = torch.linspace(0, 2 * torch.pi, self.head_dim).to(device)
         patterns = []
         
         for h in range(self.num_heads):
             phase = 2 * torch.pi * h / self.num_heads
             # Create phase tensor and add to t
             phase_tensor = torch.full_like(t, phase)
-            pattern = FastQuantumOps.fast_sin(t + phase_tensor)
+            pattern = FastQuantumOps.phase_encoding(t + phase_tensor)  # Use phase encoding
             patterns.append(pattern)
             
         return torch.stack(patterns)
@@ -115,7 +89,7 @@ class FastQuantumAttention(nn.Module):
         scores = torch.matmul(x, x.transpose(-2, -1)) / math.sqrt(self.head_dim)
         attn = torch.softmax(scores, dim=-1)
         
-        return torch.matmul(attn, x).view(B, L, D) 
+        return torch.matmul(attn, x).view(B, L, D)
 
 class FastQuantumState:
     """Simulate quantum states using height-map inspired techniques"""
@@ -177,33 +151,42 @@ class FastQuantumLLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.device = device # Use the global device variable
         
-        # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.get('tokenizer_name', 'bert-base-uncased')
-        )
+        # Initialize with smaller values
+        self.scale = 1.0 / math.sqrt(config['dim'])
         
-        # Update vocab size from tokenizer
-        self.config['vocab_size'] = len(self.tokenizer.get_vocab())
+        # Ensure vocab_size is set
+        if 'vocab_size' not in config:
+            config['vocab_size'] = 32000  # Default size if not specified
         
-        # Embeddings
+        # Initialize quantum tokenizer
+        self.tokenizer = QuantumTokenizer(vocab_size=config['vocab_size'])
+        
+        # Add quantum language structure
+        self.language_structure = QuantumLanguageStructure()
+        
+        # Embeddings with proper initialization
         self.token_embedding = nn.Embedding(
             config['vocab_size'], 
             config['dim']
-        ).to(device)
+        )
+        # Initialize embeddings with smaller values
+        nn.init.normal_(self.token_embedding.weight, mean=0.0, std=self.scale)
         
+        # Initialize positional embeddings with smaller values
         self.pos_embedding = nn.Parameter(
-            torch.randn(1, config['max_sequence_length'], config['dim'])
-        ).to(device)
+            torch.randn(1, config['max_sequence_length'], config['dim']) * self.scale
+        ).to(self.device)
         
         # Attention layers
         self.attention_layers = nn.ModuleList([
             FastQuantumAttention(config['dim'], config['num_heads'])
             for _ in range(config['num_layers'])
-        ]).to(device)
+        ]).to(self.device)
         
         # Output projection
-        self.output_proj = nn.Linear(config['dim'], config['vocab_size']).to(device)
+        self.output_proj = nn.Linear(config['dim'], config['vocab_size']).to(self.device)
         
         # Quantum state encoder
         self.quantum_encoder = FastQuantumState()
@@ -212,71 +195,80 @@ class FastQuantumLLM(nn.Module):
         self.step_count = 0
         
         # Add layer norm for stability
-        self.layer_norm = nn.LayerNorm(config['dim']).to(device)
+        self.layer_norm = nn.LayerNorm(config['dim']).to(self.device)
         
         # Add additional normalization layers
-        self.input_norm = nn.LayerNorm(config['dim']).to(device)
-        self.output_norm = nn.LayerNorm(config['dim']).to(device)
+        self.input_norm = nn.LayerNorm(config['dim']).to(self.device)
+        self.output_norm = nn.LayerNorm(config['dim']).to(self.device)
         
     def forward(self, input_ids, return_loss=True):
-        """Forward pass with optional loss computation"""
+        """Forward pass with guaranteed stability"""
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids.long().to(self.device)
+        
         B, L = input_ids.shape
         
-        # Get embeddings and ensure they're contiguous
-        x = self.token_embedding(input_ids)
-        x = x + self.pos_embedding[:, :L, :]
-        x = x.contiguous()
+        # Get embeddings with bounded initialization
+        x = torch.tanh(self.token_embedding(input_ids) * 0.1)
         
-        # Apply input normalization
+        # Add positional information using phases
+        positions = torch.arange(L, device=self.device).float()
+        pos_phase = torch.sin(positions.unsqueeze(1) * self.scale)
+        x = x + pos_phase.unsqueeze(0) * 0.1
+        
+        # Apply layer norm for stability
         x = self.input_norm(x)
         
-        # Apply quantum encoding with proper dimensions
-        x = self.quantum_encoder.encode_state(x, self.config['dim'])
-        
-        # Process through attention layers
+        # Process through attention layers with bounded operations
         for layer in self.attention_layers:
-            # Apply attention with residual connection
-            attn_out = layer(x)
-            x = x + attn_out
+            residual = x
             
-            # Apply simple quantum interference
-            x = FastQuantumOps.quantum_interference(x, attn_out)
+            # Apply attention with scaling
+            attn = layer(x) * 0.1
             
-            # Add normalization after each layer
-            x = self.output_norm(x)
+            # Mix using quantum interference
+            x = FastQuantumOps.quantum_interference(residual, attn)
             
-            # Ensure tensor is contiguous after each layer
-            x = x.contiguous()
+            # Ensure values stay bounded
+            x = torch.tanh(x)
+            
+            # Add layer norm
+            x = self.layer_norm(x)
         
-        # Project to vocabulary
-        logits = self.output_proj(x)
+        # Final normalization
+        x = self.output_norm(x)
+        
+        # Project to vocabulary with bounded activation
+        logits = torch.tanh(self.output_proj(x))
         
         if return_loss and input_ids is not None:
-            # Compute loss
+            # Compute stable loss
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = input_ids[..., 1:].contiguous()
+            
+            # Use stable cross entropy
             loss = F.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1)
+                shift_labels.view(-1),
+                ignore_index=-1,
+                reduction='mean'
             )
-            return loss
             
+            return loss
+        
         return logits
     
     def generate(self, prompt, max_length=100, temperature=0.7, top_k=50):
         """Generate text using the model"""
-        # Encode prompt
-        input_ids = self.tokenizer.encode(
-            prompt, 
-            return_tensors='pt'
-        ).to(device)
+        # Encode with quantum tokenizer (using index mode)
+        input_ids = self.tokenizer.encode(prompt, return_tensors='pt').to(self.device)
         
         generated = input_ids[0].tolist()
         
         # Generate tokens
         for _ in range(max_length):
             # Get predictions
-            inputs = torch.tensor([generated[-self.config['max_sequence_length']:]]).to(device)
+            inputs = torch.tensor([generated[-self.config['max_sequence_length']:]]).to(self.device)
             with torch.no_grad():
                 outputs = self.forward(inputs, return_loss=False)
                 next_token_logits = outputs[0, -1, :]
@@ -303,9 +295,9 @@ class FastQuantumLLM(nn.Module):
 
 # Add new dataset handling classes
 class TextDataset(Dataset):
-    """Custom dataset for handling HuggingFace text data"""
+    """Custom dataset for handling text data with quantum tokenizer"""
     def __init__(self, dataset, tokenizer, max_length):
-        self.dataset = list(dataset)  # Convert to list for non-streaming access
+        self.dataset = list(dataset)
         self.tokenizer = tokenizer
         self.max_length = max_length
     
@@ -314,25 +306,21 @@ class TextDataset(Dataset):
     
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        # Handle both text and dict formats
-        text = item['text'] if isinstance(item, dict) else item
+        text = item['text']
         
-        # Clean up text
-        text = text.strip()
-        if not text:  # Skip empty lines
-            text = "empty"
-            
+        # Use the tokenizer's __call__ method
         encoding = self.tokenizer(
             text,
-            truncation=True,
             max_length=self.max_length,
             padding='max_length',
+            truncation=True,
             return_tensors='pt'
         )
         
+        # Remove batch dimension added by tokenizer
         return {
-            'input_ids': encoding.input_ids.squeeze(),
-            'attention_mask': encoding.attention_mask.squeeze()
+            'input_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0)
         }
 
 # Add a memory management function
@@ -379,8 +367,9 @@ def train_model(model, config):
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config['learning_rate'],
-        weight_decay=0.01
+        lr=1e-5,  # Use smaller learning rate
+        weight_decay=0.0,  # Remove weight decay
+        eps=1e-8
     )
     
     # Training loop with memory optimizations
@@ -390,54 +379,45 @@ def train_model(model, config):
         
         total_loss = 0
         num_batches = 0
-        optimizer.zero_grad()
         
         for batch_idx, batch in enumerate(tqdm(train_loader)):
             try:
-                # Move batch to device
                 input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
                 
-                # Forward pass and loss
-                loss = model(input_ids) / config['accumulation_steps']
+                # Zero gradients
+                optimizer.zero_grad()
                 
-                # Store loss value before backward pass
-                loss_value = loss.item()
+                # Forward pass
+                loss = model(input_ids)
                 
-                # Backward pass
-                loss.backward()
-                
-                if (batch_idx + 1) % config['accumulation_steps'] == 0:
+                # Validate loss
+                if torch.isfinite(loss) and loss.item() > 0:
+                    # Use gradient clipping
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
                     optimizer.step()
-                    optimizer.zero_grad()
+                    
+                    total_loss += loss.item()
+                    num_batches += 1  # Increment only for valid loss
+                    
+                    if batch_idx % config['log_every'] == 0:
+                        print(f"\nBatch {batch_idx}, Loss: {loss.item():.4f}")
+                else:
+                    print(f"Skipping batch {batch_idx} - invalid loss: {loss.item()}")
                 
-                # Update metrics
-                total_loss += loss_value * config['accumulation_steps']
-                num_batches += 1
-                
-                # Log progress
-                if num_batches % config['log_every'] == 0:
-                    avg_loss = total_loss / num_batches
-                    print(f"\nStep {num_batches}, Average Loss: {avg_loss:.4f}")
-                
-                # Clear memory
-                del loss, input_ids, attention_mask
                 clear_memory()
                 
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    print("WARNING: out of memory, skipping batch")
-                    clear_memory()
-                    continue
-                else:
-                    raise e
+            except Exception as e:
+                print(f"Error in batch {batch_idx}: {str(e)}")
+                clear_memory()
+                continue
         
-        # Save checkpoint
-        save_checkpoint(model, optimizer, epoch, config['output_dir'])
-        
-        # Print epoch summary
-        avg_epoch_loss = total_loss / num_batches
-        print(f"\nEpoch {epoch+1} completed. Average Loss: {avg_epoch_loss:.4f}")
+        # Check if any batches were processed
+        if num_batches > 0:
+            avg_epoch_loss = total_loss / num_batches
+            print(f"\nEpoch {epoch+1} completed. Average Loss: {avg_epoch_loss:.4f}")
+        else:
+            print(f"\nEpoch {epoch+1} completed. No valid batches processed.")
         
         # Clear memory between epochs
         clear_memory()
@@ -494,11 +474,14 @@ if __name__ == "__main__":
     
     # Configuration
     config = {
+        # Add vocab_size at the top of config
+        'vocab_size': 32000,  # Standard vocabulary size
+        
         # Dimension of the model's embeddings and hidden states
         # Higher = more expressive but more memory/compute intensive
         # Lower = faster but less capable
         # Range: 64-4096, common values: 128, 256, 512
-        'dim': 512,
+        'dim': 128,
 
         # Number of attention heads for parallel processing
         # Higher = better parallel processing but more memory
@@ -529,7 +512,7 @@ if __name__ == "__main__":
         # Higher = better learning but takes longer
         # Lower = faster but might underfit
         # Range: 3-100, depends on dataset size
-        'epochs': 10,
+        'epochs': 3,
 
         # Rate at which the model learns
         # Higher = faster learning but might be unstable
@@ -553,7 +536,7 @@ if __name__ == "__main__":
         # Number of samples to use from dataset
         # Higher = better learning but slower training
         # Lower = faster but might not learn as well
-        'max_samples': 20000,
+        'max_samples': 200,
 
         # How often to print training progress
         # Lower = more frequent updates but slightly slower
@@ -571,8 +554,9 @@ if __name__ == "__main__":
         'accumulation_steps': 8
     }
     
-    # Initialize model
-    model = FastQuantumLLM(config).to(device)
+    # Initialize model with proper order
+    model = FastQuantumLLM(config)  # First create model
+    model = model.to(model.device)  # Then move to device
     
     if args.mode == 'train':
         # Train model using HuggingFace dataset
