@@ -7,6 +7,16 @@ from pathlib import Path
 from tqdm import tqdm
 from transformers import AutoTokenizer
 import time
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+from torch.utils.data.dataset import Dataset
+import os
+import torch.backends.mps
+import gc
+import argparse
+
+os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.5'  # Use 50% of available memory
+os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO'] = '0.3'   # Free memory when usage goes below 30%
 
 class FastQuantumOps:
     """Handle quantum operations using fast trigonometric approximations"""
@@ -106,31 +116,49 @@ class FastQuantumState:
     
     @staticmethod
     def encode_state(x, dim):
-        """Encode quantum state using separable 1D transforms"""
+        """Memory-efficient state encoding"""
         B, L, D = x.shape
         
-        # Use separable 1D height-maps
-        h = torch.linspace(0, 1, D).to("mps")
-        v = torch.linspace(0, 1, D).to("mps")
+        # Process in smaller chunks if needed
+        chunk_size = min(L, 64)  # Process 64 tokens at a time
+        outputs = []
         
-        # Create interference pattern using outer product
-        h_pattern = FastQuantumOps.fast_sin(h * torch.pi)
-        v_pattern = FastQuantumOps.fast_sin(v * torch.pi)
+        for i in range(0, L, chunk_size):
+            # Get chunk and ensure it's contiguous
+            chunk = x[:, i:i+chunk_size, :].contiguous()
+            curr_chunk_size = chunk.size(1)  # Actual size of this chunk
+            
+            # Process chunk
+            h = torch.linspace(0, 1, D).to("mps")
+            v = torch.linspace(0, 1, D).to("mps")
+            
+            h_pattern = FastQuantumOps.fast_sin(h * torch.pi)
+            v_pattern = FastQuantumOps.fast_sin(v * torch.pi)
+            
+            # Reshape properly
+            chunk_flat = chunk.reshape(B * curr_chunk_size, D)
+            
+            # Project through patterns
+            h_proj = torch.matmul(chunk_flat, h_pattern.unsqueeze(1))  # [B*chunk_size, 1]
+            v_proj = torch.matmul(chunk_flat, v_pattern.unsqueeze(1))  # [B*chunk_size, 1]
+            
+            # Expand projections
+            h_proj = h_proj.expand(-1, D)  # [B*chunk_size, D]
+            v_proj = v_proj.expand(-1, D)  # [B*chunk_size, D]
+            
+            # Combine projections
+            output = (h_proj + v_proj) / 2.0
+            
+            # Reshape back to [B, chunk_size, D]
+            output = output.reshape(B, curr_chunk_size, D)
+            
+            outputs.append(output)
+            
+            # Clear intermediate tensors
+            del h_pattern, v_pattern, h_proj, v_proj, chunk_flat
         
-        # Reshape for efficient computation
-        x_flat = x.view(B * L, D)  # [B*L, D]
-        
-        # Project through quantum state while maintaining dimensions
-        h_proj = torch.matmul(x_flat, h_pattern.unsqueeze(1))  # [B*L, 1]
-        v_proj = torch.matmul(x_flat, v_pattern.unsqueeze(1))  # [B*L, 1]
-        
-        # Expand projections to match original dimension
-        h_proj = h_proj.expand(-1, D)  # [B*L, D]
-        v_proj = v_proj.expand(-1, D)  # [B*L, D]
-        
-        # Combine projections while maintaining dimensions
-        output = (h_proj + v_proj) / 2.0  # Simple averaging
-        output = output.view(B, L, D)  # Reshape back to original dimensions
+        # Combine chunks
+        output = torch.cat(outputs, dim=1)
         
         # Add residual connection and normalize
         output = output + x
@@ -188,9 +216,10 @@ class FastQuantumLLM(nn.Module):
         """Forward pass with optional loss computation"""
         B, L = input_ids.shape
         
-        # Get embeddings
+        # Get embeddings and ensure they're contiguous
         x = self.token_embedding(input_ids)
         x = x + self.pos_embedding[:, :L, :]
+        x = x.contiguous()
         
         # Apply input normalization
         x = self.input_norm(x)
@@ -209,6 +238,9 @@ class FastQuantumLLM(nn.Module):
             
             # Add normalization after each layer
             x = self.output_norm(x)
+            
+            # Ensure tensor is contiguous after each layer
+            x = x.contiguous()
         
         # Project to vocabulary
         logits = self.output_proj(x)
@@ -263,54 +295,143 @@ class FastQuantumLLM(nn.Module):
         
         return self.tokenizer.decode(generated)
 
-def train_model(model, train_data, config):
-    """Train the model"""
-    print("Starting training...")
+# Add new dataset handling classes
+class TextDataset(Dataset):
+    """Custom dataset for handling HuggingFace text data"""
+    def __init__(self, dataset, tokenizer, max_length):
+        self.dataset = list(dataset)  # Convert to list for non-streaming access
+        self.tokenizer = tokenizer
+        self.max_length = max_length
     
-    # Setup optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config['learning_rate']
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        # Handle both text and dict formats
+        text = item['text'] if isinstance(item, dict) else item
+        
+        # Clean up text
+        text = text.strip()
+        if not text:  # Skip empty lines
+            text = "empty"
+            
+        encoding = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=self.max_length,
+            padding='max_length',
+            return_tensors='pt'
+        )
+        
+        return {
+            'input_ids': encoding.input_ids.squeeze(),
+            'attention_mask': encoding.attention_mask.squeeze()
+        }
+
+# Add a memory management function
+def clear_memory():
+    """Clear memory caches"""
+    gc.collect()
+    torch.mps.empty_cache()
+
+# Update the train_model function to use the new memory management
+def train_model(model, config):
+    """Train the model using HuggingFace dataset with memory optimizations"""
+    print("Loading dataset...")
+    clear_memory()  # Clear memory before starting
+    
+    # Load dataset with memory efficiency
+    dataset = load_dataset(
+        config['dataset_name'],
+        config['dataset_config'],
+        split='train',
+        streaming=True
     )
     
-    # Training loop
+    if config.get('max_samples'):
+        dataset = dataset.take(config['max_samples'])
+    
+    # Create training dataset
+    train_dataset = TextDataset(
+        dataset,
+        model.tokenizer,
+        config['max_sequence_length']
+    )
+    
+    # Create data loader with smaller num_workers
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True
+    )
+    
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config['learning_rate'],
+        weight_decay=0.01
+    )
+    
+    # Training loop with memory optimizations
     model.train()
     for epoch in range(config['epochs']):
         print(f"\nEpoch {epoch+1}/{config['epochs']}")
         
         total_loss = 0
         num_batches = 0
+        optimizer.zero_grad()
         
-        for i in tqdm(range(0, len(train_data), config['batch_size'])):
-            batch_texts = train_data[i:i + config['batch_size']]
-            
-            # Tokenize batch
-            encodings = model.tokenizer(
-                batch_texts,
-                padding=True,
-                truncation=True,
-                max_length=config['max_sequence_length'],
-                return_tensors='pt'
-            ).to("mps")
-            
-            # Forward pass and loss
-            loss = model(encodings.input_ids)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            # Log progress
-            if num_batches % 10 == 0:
-                avg_loss = total_loss / num_batches
-                print(f"\nStep {num_batches}, Average Loss: {avg_loss:.4f}")
+        for batch_idx, batch in enumerate(tqdm(train_loader)):
+            try:
+                # Move batch to device
+                input_ids = batch['input_ids'].to("mps")
+                attention_mask = batch['attention_mask'].to("mps")
+                
+                # Forward pass and loss
+                loss = model(input_ids) / config['accumulation_steps']
+                
+                # Store loss value before backward pass
+                loss_value = loss.item()
+                
+                # Backward pass
+                loss.backward()
+                
+                if (batch_idx + 1) % config['accumulation_steps'] == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
+                # Update metrics
+                total_loss += loss_value * config['accumulation_steps']
+                num_batches += 1
+                
+                # Log progress
+                if num_batches % config['log_every'] == 0:
+                    avg_loss = total_loss / num_batches
+                    print(f"\nStep {num_batches}, Average Loss: {avg_loss:.4f}")
+                
+                # Clear memory
+                del loss, input_ids, attention_mask
+                clear_memory()
+                
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    print("WARNING: out of memory, skipping batch")
+                    clear_memory()
+                    continue
+                else:
+                    raise e
         
         # Save checkpoint
         save_checkpoint(model, optimizer, epoch, config['output_dir'])
+        
+        # Print epoch summary
+        avg_epoch_loss = total_loss / num_batches
+        print(f"\nEpoch {epoch+1} completed. Average Loss: {avg_epoch_loss:.4f}")
+        
+        # Clear memory between epochs
+        clear_memory()
 
 def save_checkpoint(model, optimizer, epoch, output_dir):
     """Save model checkpoint"""
@@ -325,33 +446,64 @@ def save_checkpoint(model, optimizer, epoch, output_dir):
     torch.save(checkpoint, path / f'checkpoint_epoch_{epoch}.pt')
 
 if __name__ == "__main__":
+    # Add argument parsing
+    parser = argparse.ArgumentParser(description='Quantum LLM - Train or Generate')
+    parser.add_argument('--mode', type=str, default='generate', choices=['train', 'generate'],
+                      help='Mode to run: train or generate')
+    parser.add_argument('--prompt', type=str, default='Once in India',
+                      help='Prompt for text generation')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                      help='Path to checkpoint file for generation')
+    parser.add_argument('--max_length', type=int, default=50,
+                      help='Maximum length of generated text')
+    parser.add_argument('--temperature', type=float, default=0.1,
+                      help='Temperature for text generation')
+    args = parser.parse_args()
+
     # Configuration
     config = {
-        'dim': 512,  # Reduced dimension for faster training
-        'num_heads': 8,
-        'num_layers': 6,
-        'max_sequence_length': 1024,
-        'batch_size': 16,
+        'dim': 128,
+        'num_heads': 2,
+        'num_layers': 2,
+        'max_sequence_length': 256,
+        'batch_size': 2,
         'epochs': 3,
         'learning_rate': 1e-4,
         'output_dir': 'quantum_checkpoints',
-        'tokenizer_name': 'bert-base-uncased'
+        'tokenizer_name': 'bert-base-uncased',
+        'dataset_name': 'wikitext',
+        'dataset_config': 'wikitext-2-v1',
+        'max_samples': 200,
+        'log_every': 5,
+        'gradient_clip': 0.5,
+        'accumulation_steps': 8
     }
     
     # Initialize model
     model = FastQuantumLLM(config).to("mps")
     
-    # Sample training data
-    train_data = [
-        "This is a sample text for training.",
-        "The quantum-inspired model learns patterns.",
-        "Fast and efficient text generation."
-    ]
-    
-    # Train model
-    train_model(model, train_data, config)
-    
-    # Generate text
-    prompt = "Once upon a time"
-    generated_text = model.generate(prompt, max_length=50)
-    print(f"\nGenerated text:\n{generated_text}") 
+    if args.mode == 'train':
+        # Train model using HuggingFace dataset
+        train_model(model, config)
+    else:
+        # Load checkpoint if provided
+        if args.checkpoint:
+            checkpoint_path = Path(args.checkpoint)
+            if checkpoint_path.exists():
+                print(f"Loading checkpoint from {checkpoint_path}")
+                checkpoint = torch.load(checkpoint_path)
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                print(f"Warning: Checkpoint {checkpoint_path} not found. Using untrained model.")
+        
+        # Generate text
+        print(f"\nGenerating text with prompt: {args.prompt}")
+        print(f"Temperature: {args.temperature}, Max Length: {args.max_length}")
+        
+        generated_text = model.generate(
+            args.prompt,
+            max_length=args.max_length,
+            temperature=args.temperature,
+            top_k=100
+        )
+        print(f"\nGenerated text:\n{generated_text}") 
