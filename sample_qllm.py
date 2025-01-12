@@ -7,22 +7,21 @@ from collections import defaultdict
 import re
 import math
 import os
+from transformers import AutoTokenizer
+import torch
+import torch.nn as nn
+import itertools
 
 class EnhancedQuantumTokenizer:
-    """Enhanced tokenizer with multi-level tokenization and quantum encoding"""
-    def __init__(self, vocab_size, max_sequence_length=2048):
-        self.vocab_size = vocab_size
+    """Enhanced tokenizer using Hugging Face tokenizers and quantum encoding"""
+    def __init__(self, max_sequence_length=2048, tokenizer_name="bert-base-uncased"):
         self.max_sequence_length = max_sequence_length
-        
-        # Initialize vocabularies
-        self.vocab = {'<PAD>': 0, '<UNK>': 1, '<BOS>': 2, '<EOS>': 3, '<MASK>': 4}
+
+        # Load tokenizer from Hugging Face
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.vocab = self.tokenizer.get_vocab()
         self.reverse_vocab = {v: k for k, v in self.vocab.items()}
-        
-        # Initialize multi-level vocabulary
-        self._initialize_char_vocab()
-        self._initialize_subword_vocab()
-        self._initialize_word_vocab()
-        
+
         # Quantum encoding maps
         self.quantum_encodings = self._initialize_quantum_encodings()
     
@@ -55,9 +54,11 @@ class EnhancedQuantumTokenizer:
         encodings = {}
         dim = 64  # Encoding dimension
         
-        for token_id in range(self.vocab_size):
+        vocab_size = len(self.vocab)  # Get vocab size from tokenizer
+        
+        for token_id in range(vocab_size):
             # Create quantum state vector
-            phase = 2 * np.pi * token_id / self.vocab_size
+            phase = 2 * np.pi * token_id / vocab_size
             state = np.zeros(dim, dtype=np.complex128)
             
             # Fill with superposition of bases
@@ -72,55 +73,29 @@ class EnhancedQuantumTokenizer:
         return encodings
     
     def encode(self, text, max_length=None):
-        """Encode text using multi-level tokenization"""
+        """Encode text using the Hugging Face tokenizer"""
         if not text:
             return []
-        
-        tokens = []
-        words = text.split()
-        
-        for word in words:
-            if word in self.vocab:
-                tokens.append(self.vocab[word])
-            else:
-                # Try subword tokenization
-                subword_tokens = self._subword_tokenize(word)
-                tokens.extend(subword_tokens)
-        
-        if max_length:
-            tokens = tokens[:max_length-2]
-            return [self.vocab['<BOS>']] + tokens + [self.vocab['<EOS>']]
-        
-        return tokens
-    
-    def _subword_tokenize(self, word):
-        """Tokenize word into subwords"""
-        tokens = []
-        while word:
-            found = False
-            # Try to find longest matching subword
-            for i in range(len(word), 0, -1):
-                subword = word[:i]
-                if subword in self.vocab:
-                    tokens.append(self.vocab[subword])
-                    word = word[i:]
-                    found = True
-                    break
-            
-            if not found:
-                # Character-level fallback
-                tokens.append(self.vocab.get(word[0], self.vocab['<UNK>']))
-                word = word[1:]
-        
-        return tokens
+
+        encoded = self.tokenizer(
+            text,
+            add_special_tokens=True,
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="np"
+        )
+
+        return encoded["input_ids"][0]
     
     def decode(self, tokens):
         """Decode token IDs back to text"""
-        return ' '.join(self.reverse_vocab.get(token, '<UNK>') for token in tokens)
+        return self.tokenizer.decode(tokens, skip_special_tokens=True)
 
-class EnhancedQuantumAttention:
+class EnhancedQuantumAttention(nn.Module):
     """Enhanced attention mechanism with multi-scale processing"""
     def __init__(self, dim, num_heads, max_sequence_length=2048):
+        super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -142,21 +117,21 @@ class EnhancedQuantumAttention:
     
     def _generate_wave_patterns(self, frequency):
         """Generate complex wave patterns"""
-        head_dim = self.head_dim  # Use head_dim from initialization
-        patterns = np.zeros((self.num_heads, self.max_sequence_length, head_dim), 
-                           dtype=np.complex128)
+        head_dim = self.head_dim
+        patterns = torch.zeros((self.num_heads, self.max_sequence_length, head_dim),
+                               dtype=torch.complex64, device="mps")
         
         for h in range(self.num_heads):
             phase = 2 * np.pi * h / self.num_heads
-            t = np.linspace(0, 2*np.pi*frequency, self.max_sequence_length)
+            t = torch.linspace(0, 2 * np.pi * frequency, self.max_sequence_length, device="mps")
             
             for d in range(head_dim):
-                patterns[h, :, d] = (np.exp(1j * (t + phase)) + 
-                                   np.exp(1j * (2*t + phase)) +
-                                   np.exp(1j * (0.5*t + phase)))
+                patterns[h, :, d] = (torch.exp(1j * (t + phase)) +
+                                   torch.exp(1j * (2 * t + phase)) +
+                                   torch.exp(1j * (0.5 * t + phase)))
         
         # Normalize across sequence length dimension
-        patterns = patterns / np.sqrt(np.sum(np.abs(patterns)**2, axis=1, keepdims=True))
+        patterns = patterns / torch.sqrt(torch.sum(torch.abs(patterns)**2, dim=1, keepdim=True))
         return patterns
     
     def _initialize_expert_patterns(self):
@@ -178,35 +153,63 @@ class EnhancedQuantumAttention:
     
     def _generate_expert_wave_pattern(self, frequency, dim):
         """Generate quantum wave pattern for experts"""
-        pattern = np.zeros((self.max_sequence_length, dim), dtype=np.complex128)
+        pattern = torch.zeros((self.max_sequence_length, dim), dtype=torch.complex64, device="mps")
         
         # Create quantum interference pattern
-        t = np.linspace(0, 2*np.pi, self.max_sequence_length)
+        t = torch.linspace(0, 2 * np.pi, self.max_sequence_length, device="mps")
         for d in range(dim):
             phase = 2 * np.pi * d / dim
-            pattern[:, d] = np.exp(1j * (frequency * t + phase))
+            pattern[:, d] = torch.exp(1j * (frequency * t + phase))
         
         # Normalize the pattern
-        pattern = pattern / np.sqrt(np.sum(np.abs(pattern)**2, axis=1, keepdims=True))
+        pattern = pattern / torch.sqrt(torch.sum(torch.abs(pattern)**2, dim=0, keepdim=True))
         return pattern
     
-    def _apply_expert(self, x, expert):
-        """Apply expert pattern using quantum interference"""
-        B, H, L, D = x.shape  # Batch, Heads, Length, Dim
+    def _process_scale(self, Q, K, V, pattern, mask=None):
+        """Process attention at a specific scale"""
+        B, H, L, D = Q.shape  # Batch, Heads, Length, Head_dim
         
-        # Reshape input for quantum interference
-        x_flat = x.reshape(B * H, L, D)
+        # Reshape pattern to match Q and K shapes
+        pattern = pattern[:H, :L, :]  # [heads, seq_len, head_dim]
+        pattern = pattern.unsqueeze(0)  # [1, heads, seq_len, head_dim]
+        pattern = pattern.expand(B, -1, -1, -1)  # [batch, heads, seq_len, head_dim]
         
-        # Apply quantum interference patterns
-        syntax = np.einsum('bld,ld->bld', x_flat, expert['syntax'][:L])
-        semantics = np.einsum('bld,ld->bld', x_flat, expert['semantics'][:L])
-        context = np.einsum('bld,ld->bld', x_flat, expert['context'][:L])
+        # Apply interference pattern
+        Q = Q * pattern
+        K = K * pattern
         
-        # Combine using quantum superposition
-        combined = (syntax + semantics + context) / np.sqrt(3)
+        # Split into real and imaginary parts
+        Q_real, Q_imag = Q.real, Q.imag
+        K_real, K_imag = K.real, K.imag
         
-        # Reshape back to original dimensions
-        return combined.reshape(B, H, L, D)
+        # Compute attention scores with complex multiplication
+        # (a + bi)(c + di) = (ac - bd) + (ad + bc)i
+        K_t_real = K_real.transpose(-2, -1)
+        K_t_imag = K_imag.transpose(-2, -1)
+        
+        scores_real = torch.matmul(Q_real, K_t_real) - torch.matmul(Q_imag, K_t_imag)
+        scores_imag = torch.matmul(Q_real, K_t_imag) + torch.matmul(Q_imag, K_t_real)
+        
+        # Compute magnitude for attention scores
+        scores_magnitude = torch.sqrt(scores_real**2 + scores_imag**2) / math.sqrt(D)
+        
+        if mask is not None:
+            scores_magnitude = scores_magnitude.masked_fill(mask == 0, float('-inf'))
+        
+        # Apply softmax to magnitudes
+        attention_weights = torch.softmax(scores_magnitude, dim=-1)
+        
+        # Split V into real and imaginary parts
+        V_real, V_imag = V.real, V.imag
+        
+        # Apply attention weights to both real and imaginary parts
+        output_real = torch.matmul(attention_weights, V_real)
+        output_imag = torch.matmul(attention_weights, V_imag)
+        
+        # Combine back into complex tensor
+        output = torch.complex(output_real, output_imag)
+        
+        return output
     
     def forward(self, Q, K, V, mask=None):
         """Forward pass with quantum interference"""
@@ -221,7 +224,7 @@ class EnhancedQuantumAttention:
             scale_outputs.append(scale_output)
         
         # Quantum superposition of scale outputs
-        combined = sum(scale_outputs) / np.sqrt(len(scale_outputs))
+        combined = sum(scale_outputs) / math.sqrt(len(scale_outputs))
         
         # Apply expert patterns with quantum interference
         expert_outputs = []
@@ -230,35 +233,45 @@ class EnhancedQuantumAttention:
             expert_outputs.append(expert_output)
         
         # Final quantum combination
-        output = sum(expert_outputs) / np.sqrt(len(expert_outputs))
+        output = sum(expert_outputs) / math.sqrt(len(expert_outputs))
         return output
     
-    def _process_scale(self, Q, K, V, pattern, mask):
-        """Process attention at a specific scale"""
-        B, H, L, D = Q.shape  # Batch, Heads, Length, Head_dim
+    def _apply_expert(self, x, expert):
+        """Apply expert pattern using quantum interference"""
+        B, H, L, D = x.shape  # Batch, Heads, Length, Dim
         
-        # Reshape pattern to match Q and K shapes
-        pattern = pattern[:H, :L, :]  # [heads, seq_len, head_dim]
-        pattern = np.expand_dims(pattern, 0)  # [1, heads, seq_len, head_dim]
-        pattern = np.broadcast_to(pattern, (B, H, L, D))  # [batch, heads, seq_len, head_dim]
+        # Split input into real and imaginary parts
+        x_real = x.real.reshape(B * H, L, D)
+        x_imag = x.imag.reshape(B * H, L, D)
         
-        # Apply interference pattern
-        Q = Q * pattern
-        K = K * pattern
+        # Ensure expert patterns are on the correct device and split into real/imag
+        expert_patterns = {}
+        for aspect, pattern in expert.items():
+            pattern = pattern.to(x.device)
+            expert_patterns[f"{aspect}_real"] = pattern.real[:L]
+            expert_patterns[f"{aspect}_imag"] = pattern.imag[:L]
         
-        # Compute attention scores
-        scores = np.matmul(Q, K.transpose(0, 1, 3, 2)) / np.sqrt(D)
+        # Apply patterns separately to real and imaginary parts
+        outputs_real = []
+        outputs_imag = []
+        for aspect in ['syntax', 'semantics', 'context']:
+            # Complex multiplication in parts
+            real_part = (torch.einsum('bld,ld->bld', x_real, expert_patterns[f"{aspect}_real"]) - 
+                        torch.einsum('bld,ld->bld', x_imag, expert_patterns[f"{aspect}_imag"]))
+            imag_part = (torch.einsum('bld,ld->bld', x_real, expert_patterns[f"{aspect}_imag"]) + 
+                        torch.einsum('bld,ld->bld', x_imag, expert_patterns[f"{aspect}_real"]))
+            outputs_real.append(real_part)
+            outputs_imag.append(imag_part)
         
-        if mask is not None:
-            scores = np.where(mask == 0, -1e9, scores)
+        # Combine using quantum superposition
+        combined_real = sum(outputs_real) / math.sqrt(3)
+        combined_imag = sum(outputs_imag) / math.sqrt(3)
         
-        # Attention weights
-        weights = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
-        weights = weights / np.sum(weights, axis=-1, keepdims=True)
-        
-        # Apply attention to values
-        output = np.matmul(weights, V)
-        return output
+        # Reshape back to original dimensions and combine into complex tensor
+        return torch.complex(
+            combined_real.reshape(B, H, L, D),
+            combined_imag.reshape(B, H, L, D)
+        )
 
 class EnhancedUniversalPatterns:
     """Enhanced pattern recognition using universal constants"""
@@ -270,8 +283,8 @@ class EnhancedUniversalPatterns:
         """Initialize patterns using multiple universal constants"""
         patterns = {}
         
-        # Golden ratio patterns
-        phi = (1 + np.sqrt(5)) / 2
+        # Golden ratio patterns - using tensor operations
+        phi = (1 + torch.tensor(5.0, device="mps").sqrt()) / 2
         patterns['golden'] = self._generate_golden_patterns(phi)
         
         # Pi-based patterns
@@ -284,34 +297,50 @@ class EnhancedUniversalPatterns:
     
     def _generate_golden_patterns(self, phi):
         """Generate patterns based on golden ratio"""
-        patterns = np.zeros((self.dim, self.dim))
-        for i in range(self.dim):
-            for j in range(self.dim):
-                patterns[i, j] = phi ** ((i + j) / self.dim)
-        return patterns / np.max(patterns)
+        # Create indices tensors
+        i_indices = torch.arange(self.dim, device="mps").unsqueeze(1)
+        j_indices = torch.arange(self.dim, device="mps").unsqueeze(0)
+        
+        # Compute powers using broadcasting
+        powers = (i_indices + j_indices).float() / self.dim
+        patterns = phi.pow(powers).to(dtype=torch.complex64)
+        
+        return patterns / torch.max(torch.abs(patterns))
     
     def _generate_pi_patterns(self):
         """Generate patterns based on pi"""
-        patterns = np.zeros((self.dim, self.dim))
-        for i in range(self.dim):
-            for j in range(self.dim):
-                patterns[i, j] = np.sin(np.pi * (i + j) / self.dim)
+        # Create indices tensors
+        i_indices = torch.arange(self.dim, device="mps").unsqueeze(1)
+        j_indices = torch.arange(self.dim, device="mps").unsqueeze(0)
+        
+        # Compute using torch operations
+        angle = torch.pi * (i_indices + j_indices).float() / self.dim
+        patterns = torch.sin(angle).to(dtype=torch.complex64)
+        
         return patterns
     
     def _generate_e_patterns(self):
         """Generate patterns based on e"""
-        patterns = np.zeros((self.dim, self.dim))
-        for i in range(self.dim):
-            for j in range(self.dim):
-                patterns[i, j] = np.exp(-(i + j) / self.dim)
+        # Create indices tensors
+        i_indices = torch.arange(self.dim, device="mps").unsqueeze(1)
+        j_indices = torch.arange(self.dim, device="mps").unsqueeze(0)
+        
+        # Compute using torch operations
+        exponent = -(i_indices + j_indices).float() / self.dim
+        patterns = torch.exp(exponent).to(dtype=torch.complex64)
+        
         return patterns
     
     def forward(self, x):
         """Apply universal patterns to input"""
-        output = x.copy()
+        # Create a new tensor instead of copying
+        output = x.clone()
         
         for pattern in self.patterns.values():
-            output = output + np.matmul(output, pattern)
+            # Ensure pattern is on the same device as input
+            pattern = pattern.to(x.device)
+            # Apply pattern using proper broadcasting
+            output = output + torch.matmul(output, pattern)
         
         return output / len(self.patterns)
 
@@ -347,20 +376,20 @@ class EnhancedQuantumOptimizer:
         
         # Update parameters
         for name, param in params.items():
-            if isinstance(param, np.ndarray):
+            if isinstance(param, torch.Tensor):
                 grad = grads[name]
                 
                 # Update momentum terms (maintain complex type)
                 self.m[name] = self.beta1 * self.m[name] + (1 - self.beta1) * grad
-                self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * np.abs(grad)**2
+                self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * torch.abs(grad)**2
                 
                 # Bias correction
                 m_hat = self.m[name] / (1 - self.beta1**self.step_count)
                 v_hat = self.v[name] / (1 - self.beta2**self.step_count)
                 
                 # Quantum-inspired update (keep complex type)
-                phase = np.angle(m_hat + 1j * v_hat)
-                update = self.learning_rate * m_hat / (np.sqrt(v_hat) + 1e-8) * np.exp(1j * phase)
+                phase = torch.angle(m_hat + 1j * v_hat)
+                update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8) * torch.exp(1j * phase)
                 
                 # Update parameter (maintain complex type)
                 param -= update
@@ -374,15 +403,15 @@ class EnhancedQuantumOptimizer:
                         
                         # Update momentum terms (maintain complex type)
                         self.m[name] = self.beta1 * self.m[name] + (1 - self.beta1) * grad
-                        self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * np.abs(grad)**2
+                        self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * torch.abs(grad)**2
                         
                         # Bias correction
                         m_hat = self.m[name] / (1 - self.beta1**self.step_count)
                         v_hat = self.v[name] / (1 - self.beta2**self.step_count)
                         
                         # Quantum-inspired update (keep complex type)
-                        phase = np.angle(m_hat + 1j * v_hat)
-                        update = self.learning_rate * m_hat / (np.sqrt(v_hat) + 1e-8) * np.exp(1j * phase)
+                        phase = torch.angle(m_hat + 1j * v_hat)
+                        update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8) * torch.exp(1j * phase)
                         
                         # Update parameter (maintain complex type)
                         pattern -= update
@@ -395,15 +424,15 @@ class EnhancedQuantumOptimizer:
                     
                     # Update momentum terms (maintain complex type)
                     self.m[name] = self.beta1 * self.m[name] + (1 - self.beta1) * grad
-                    self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * np.abs(grad)**2
+                    self.v[name] = self.beta2 * self.v[name] + (1 - self.beta2) * torch.abs(grad)**2
                     
                     # Bias correction
                     m_hat = self.m[name] / (1 - self.beta1**self.step_count)
                     v_hat = self.v[name] / (1 - self.beta2**self.step_count)
                     
                     # Quantum-inspired update (keep complex type)
-                    phase = np.angle(m_hat + 1j * v_hat)
-                    update = self.learning_rate * m_hat / (np.sqrt(v_hat) + 1e-8) * np.exp(1j * phase)
+                    phase = torch.angle(m_hat + 1j * v_hat)
+                    update = self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8) * torch.exp(1j * phase)
                     
                     # Update parameter (maintain complex type)
                     pattern -= update
@@ -412,107 +441,166 @@ class EnhancedQuantumOptimizer:
         """Compute gradients using quantum-inspired methods"""
         grads = {}
         eps = 1e-8
-        
+        max_grad_norm = 1.0
+
+        def handle_nan_complex(x):
+            """Handle NaN values in complex tensors"""
+            real = x.real
+            imag = x.imag
+            
+            # Handle NaN in real and imaginary parts separately
+            real = torch.where(torch.isnan(real), torch.zeros_like(real), real)
+            imag = torch.where(torch.isnan(imag), torch.zeros_like(imag), imag)
+            
+            return torch.complex(real, imag)
+
         for name, param in params.items():
-            if isinstance(param, np.ndarray):
-                grad = np.zeros_like(param, dtype=np.complex128)  # Ensure complex type for grad
-                phase = 2 * np.pi * np.random.random(param.shape)
-                
-                # Compute gradient using quantum-inspired finite differences
-                param_plus = param + eps * np.exp(1j * phase)
-                param_minus = param - eps * np.exp(1j * phase)
-                
-                if name == 'token_embeddings':
-                    model.token_embeddings = param_plus
-                    loss_plus = model.forward(model.last_input).mean()
+            print(f"Computing gradient for: {name}")
+            if isinstance(param, torch.Tensor):
+                grad = torch.zeros_like(param, dtype=torch.complex64, device="mps")
+
+                if param.dtype == torch.complex64:
+                    # Sample a subset of indices for efficiency
+                    total_elements = np.prod(param.shape)
+                    sample_size = min(1000, total_elements)
                     
-                    model.token_embeddings = param_minus
-                    loss_minus = model.forward(model.last_input).mean()
-                
-                elif name == 'position_embeddings':
-                    model.position_embeddings = param_plus
-                    loss_plus = model.forward(model.last_input).mean()
+                    # Generate random indices
+                    shape_list = list(param.shape)
+                    indices = []
+                    for _ in range(sample_size):
+                        idx = []
+                        for dim_size in shape_list:
+                            rand_idx = torch.randint(0, dim_size, (1,), device="mps")[0].item()
+                            idx.append(rand_idx)
+                        indices.append(tuple(idx))
                     
-                    model.position_embeddings = param_minus
-                    loss_minus = model.forward(model.last_input).mean()
-                
-                else:
-                    loss_plus = loss_minus = loss
-                
-                grad = (loss_plus - loss_minus) / (2 * eps) * np.exp(-1j * phase)  # Keep complex type
-                
+                    for idx in indices:
+                        print(f"  Index: {idx}")
+                        try:
+                            with torch.no_grad():
+                                param_plus = param.clone()
+                                param_plus[idx] += eps
+                                param_minus = param.clone()
+                                param_minus[idx] -= eps
+
+                                if name == 'token_embeddings':
+                                    temp = model.token_embeddings.data.clone()
+                                    
+                                    model.token_embeddings.data = param_plus
+                                    loss_plus = handle_nan_complex(model.forward(model.last_input).mean())
+                                    
+                                    model.token_embeddings.data = param_minus
+                                    loss_minus = handle_nan_complex(model.forward(model.last_input).mean())
+                                    
+                                    model.token_embeddings.data = temp
+
+                                elif name == 'position_embeddings':
+                                    temp = model.position_embeddings.data.clone()
+                                    
+                                    model.position_embeddings.data = param_plus
+                                    loss_plus = handle_nan_complex(model.forward(model.last_input).mean())
+                                    
+                                    model.position_embeddings.data = param_minus
+                                    loss_minus = handle_nan_complex(model.forward(model.last_input).mean())
+                                    
+                                    model.position_embeddings.data = temp
+
+                                else:
+                                    loss_plus = loss_minus = loss
+
+                                # Compute gradient with stability checks
+                                grad_value = (loss_plus - loss_minus) / (2 * eps)
+                                
+                                # Handle instabilities
+                                grad_value = handle_nan_complex(grad_value)
+                                
+                                # Clip gradient norm using magnitude
+                                grad_norm = torch.abs(grad_value)
+                                if grad_norm > max_grad_norm:
+                                    scale = max_grad_norm / grad_norm
+                                    grad_value = torch.complex(
+                                        grad_value.real * scale,
+                                        grad_value.imag * scale
+                                    )
+                                
+                                grad[idx] = grad_value
+                                print(f"    grad[{idx}]: {grad[idx]}")
+                                
+                        except Exception as e:
+                            print(f"    Error computing gradient at {idx}: {str(e)}")
+                            grad[idx] = torch.zeros_like(param[idx])
+
+                    # Scale gradients based on sampling
+                    grad = grad * (total_elements / sample_size)
+
+                    # Clip full gradient norm using magnitude
+                    grad_norm = torch.sqrt(torch.sum(torch.abs(grad)**2))
+                    if grad_norm > max_grad_norm:
+                        scale = max_grad_norm / grad_norm
+                        grad = torch.complex(grad.real * scale, grad.imag * scale)
+
                 grads[name] = grad
-            
-            elif isinstance(param, EnhancedQuantumAttention):
-                # Compute gradients for attention layer parameters
-                for expert_pattern in param.expert_patterns:
-                    for aspect, pattern in expert_pattern.items():
-                        name = f'{name}_expert_{aspect}'
-                        grad = np.zeros_like(pattern, dtype=np.complex128)  # Ensure complex type for grad
-                        phase = 2 * np.pi * np.random.random(pattern.shape)
-                        
-                        # Compute gradient using quantum-inspired finite differences
-                        pattern_plus = pattern + eps * np.exp(1j * phase)
-                        pattern_minus = pattern - eps * np.exp(1j * phase)
-                        
-                        expert_pattern[aspect] = pattern_plus
-                        loss_plus = model.forward(model.last_input).mean()
-                        
-                        expert_pattern[aspect] = pattern_minus
-                        loss_minus = model.forward(model.last_input).mean()
-                        
-                        grad = (loss_plus - loss_minus) / (2 * eps) * np.exp(-1j * phase)  # Keep complex type
-                        
-                        grads[name] = grad
-            
-            elif isinstance(param, EnhancedUniversalPatterns):
-                # Compute gradients for universal pattern parameters
-                for pattern_name, pattern in param.patterns.items():
-                    name = f'{name}_{pattern_name}'
-                    grad = np.zeros_like(pattern, dtype=np.complex128)  # Ensure complex type for grad
-                    phase = 2 * np.pi * np.random.random(pattern.shape)
-                    
-                    # Compute gradient using quantum-inspired finite differences
-                    pattern_plus = pattern + eps * np.exp(1j * phase)
-                    pattern_minus = pattern - eps * np.exp(1j * phase)
-                    
-                    param.patterns[pattern_name] = pattern_plus
-                    loss_plus = model.forward(model.last_input).mean()
-                    
-                    param.patterns[pattern_name] = pattern_minus
-                    loss_minus = model.forward(model.last_input).mean()
-                    
-                    grad = (loss_plus - loss_minus) / (2 * eps) * np.exp(-1j * phase)  # Keep complex type
-                    
-                    grads[name] = grad
-        
+                print(f"  Grad norm for {name}: {torch.sqrt(torch.sum(torch.abs(grad)**2))}")
+
         return grads
 
-class EnhancedQuantumLLM:
+    def _check_parameter_health(self, param, name):
+        """Check parameter health and report statistics"""
+        with torch.no_grad():
+            norm = torch.norm(param)
+            mean = torch.mean(torch.abs(param))
+            max_val = torch.max(torch.abs(param))
+            has_nan = torch.isnan(param).any()
+            has_inf = torch.isinf(param).any()
+            
+            print(f"Parameter {name} stats:")
+            print(f"  Norm: {norm}")
+            print(f"  Mean abs: {mean}")
+            print(f"  Max abs: {max_val}")
+            print(f"  Has NaN: {has_nan}")
+            print(f"  Has Inf: {has_inf}")
+            
+            return not (has_nan or has_inf)
+
+class EnhancedQuantumLLM(nn.Module):
     """Complete enhanced quantum-inspired language model"""
     def __init__(self, config):
+        super().__init__()
         self.config = config
         
         # Initialize components
         self.tokenizer = EnhancedQuantumTokenizer(
-            vocab_size=config['vocab_size'],
-            max_sequence_length=config['max_sequence_length']
+            max_sequence_length=config['max_sequence_length'],
+            tokenizer_name=config.get('tokenizer_name', 'bert-base-uncased')
         )
         
-        self.attention_layers = [
+        # Update vocab_size based on the tokenizer
+        self.config['vocab_size'] = len(self.tokenizer.vocab)
+        
+        self.attention_layers = nn.ModuleList([
             EnhancedQuantumAttention(
                 dim=config['dim'],
                 num_heads=config['num_heads'],
                 max_sequence_length=config['max_sequence_length']
             )
             for _ in range(config['num_layers'])
-        ]
+        ])
         
         self.universal_patterns = EnhancedUniversalPatterns(
             dim=config['dim']
         )
         
         # Initialize embeddings
+        self.token_embeddings = nn.Parameter(torch.zeros(
+            (self.config['vocab_size'], self.config['dim']),
+            dtype=torch.complex64, device="mps"
+        ))
+        self.position_embeddings = nn.Parameter(torch.zeros(
+            (self.config['max_sequence_length'], self.config['dim']),
+            dtype=torch.complex64, device="mps"
+        ))
+        
+        # Initialize with quantum states
         self._initialize_enhanced_embeddings()
         
         # For training
@@ -520,106 +608,165 @@ class EnhancedQuantumLLM:
     
     def _initialize_enhanced_embeddings(self):
         """Initialize embeddings with quantum-inspired patterns"""
-        self.token_embeddings = np.zeros(
-            (self.config['vocab_size'], self.config['dim']), 
-            dtype=np.complex128
-        )
-        
-        self.position_embeddings = np.zeros(
-            (self.config['max_sequence_length'], self.config['dim']), 
-            dtype=np.complex128
-        )
-        
-        # Initialize with quantum states
-        for i in range(self.config['vocab_size']):
-            self.token_embeddings[i] = self._generate_quantum_state(i)
-        
-        for pos in range(self.config['max_sequence_length']):
-            self.position_embeddings[pos] = self._generate_position_state(pos)
+        with torch.no_grad():
+            for i in range(self.config['vocab_size']):
+                self.token_embeddings[i] = self._generate_quantum_state(i)
+            
+            for pos in range(self.config['max_sequence_length']):
+                self.position_embeddings[pos] = self._generate_position_state(pos)
     
     def _generate_quantum_state(self, index):
         """Generate quantum state for token embedding"""
-        state = np.zeros(self.config['dim'], dtype=np.complex128)
-        phase = 2 * np.pi * index / self.config['vocab_size']
+        state = torch.zeros(self.config['dim'], dtype=torch.complex64, device="mps")
         
-        for i in range(self.config['dim']):
-            theta = np.pi * i / self.config['dim']
-            state[i] = np.exp(1j * (phase + theta))
+        # Convert scalar values to tensors on MPS
+        phase = torch.tensor(2 * np.pi * index / self.config['vocab_size'], device="mps")
+        indices = torch.arange(self.config['dim'], device="mps")
+        theta = torch.pi * indices / self.config['dim']
         
-        return state / np.sqrt(np.sum(np.abs(state)**2))
+        # Combine phase and theta while maintaining quantum properties
+        combined_phase = phase + theta
+        # Create complex exponential using Euler's formula with tensors
+        state = torch.exp(1j * combined_phase.to(torch.float32))
+        
+        # Normalize the quantum state
+        norm = torch.sqrt(torch.sum(torch.abs(state)**2))
+        state = state / norm
+        
+        return state
     
-    def _generate_position_state(self, position):
+    def _generate_position_state(self, pos):
         """Generate quantum state for position embedding"""
-        state = np.zeros(self.config['dim'], dtype=np.complex128)
+        state = torch.zeros(self.config['dim'], dtype=torch.complex64, device="mps")
         
-        for i in range(self.config['dim']):
-            if i % 2 == 0:
-                state[i] = np.sin(position / (10000 ** (i / self.config['dim'])))
-            else:
-                state[i] = np.cos(position / (10000 ** ((i-1) / self.config['dim'])))
+        # Convert scalar values to tensors on MPS
+        phase = torch.tensor(2 * np.pi * pos / self.config['max_sequence_length'], device="mps")
+        indices = torch.arange(self.config['dim'], device="mps")
+        theta = torch.pi * indices / self.config['dim']
         
-        return state / np.sqrt(np.sum(np.abs(state)**2))
+        # Combine phase and theta while maintaining quantum properties
+        combined_phase = phase + theta
+        # Create complex exponential using Euler's formula with tensors
+        state = torch.exp(1j * combined_phase.to(torch.float32))
+        
+        # Normalize the quantum state
+        norm = torch.sqrt(torch.sum(torch.abs(state)**2))
+        state = state / norm
+        
+        return state
     
     def forward(self, input_ids, training=True):
         """Forward pass through the model"""
-        batch_size, seq_length = input_ids.shape
-        self.last_input = input_ids  # Store for training
-        
+        self.last_input = input_ids
+
+        # Move input to MPS device
+        input_ids = input_ids.to("mps")
+
         # Get embeddings
-        embeddings = self.token_embeddings[input_ids]
-        positions = self.position_embeddings[:seq_length]
-        x = embeddings + positions[None, :, :]
-        
+        token_embeds = self.token_embeddings[input_ids]  # [batch, seq_len, dim]
+        pos_embeds = self.position_embeddings[:input_ids.shape[1]].unsqueeze(0)  # [1, seq_len, dim]
+        x = token_embeds + pos_embeds  # [batch, seq_len, dim]
+
         # Process through layers
-        attention_mask = self._create_attention_mask(seq_length)
+        attention_mask = self._create_attention_mask(input_ids.shape[1])
         
         for i in range(len(self.attention_layers)):
+            batch_size = input_ids.shape[0]
+            seq_len = input_ids.shape[1]
+            
             # Reshape for attention - split heads properly
             head_dim = self.config['dim'] // self.config['num_heads']
-            q = k = v = x.reshape(batch_size, seq_length, self.config['num_heads'], head_dim)
-            q = q.transpose(0, 2, 1, 3)  # [batch, heads, seq_len, head_dim]
-            k = k.transpose(0, 2, 1, 3)
-            v = v.transpose(0, 2, 1, 3)
+            
+            # Reshape and permute operations for attention
+            # [batch, seq_len, dim] -> [batch, seq_len, heads, head_dim]
+            q = x.view(batch_size, seq_len, self.config['num_heads'], head_dim)
+            k = x.view(batch_size, seq_len, self.config['num_heads'], head_dim)
+            v = x.view(batch_size, seq_len, self.config['num_heads'], head_dim)
+            
+            # [batch, seq_len, heads, head_dim] -> [batch, heads, seq_len, head_dim]
+            q = q.permute(0, 2, 1, 3)
+            k = k.permute(0, 2, 1, 3)
+            v = v.permute(0, 2, 1, 3)
             
             # Apply attention
-            attention_output = self.attention_layers[i].forward(q, k, v, attention_mask)
+            attention_output = self.attention_layers[i](q, k, v, mask=attention_mask)
             
-            # Reshape back
-            attention_output = attention_output.transpose(0, 2, 1, 3)
-            attention_output = attention_output.reshape(batch_size, seq_length, -1)
+            # Reshape back: [batch, heads, seq_len, head_dim] -> [batch, seq_len, heads, head_dim]
+            attention_output = attention_output.permute(0, 2, 1, 3)
+            
+            # [batch, seq_len, heads, head_dim] -> [batch, seq_len, dim]
+            attention_output = attention_output.reshape(batch_size, seq_len, -1)
+            
+            # Residual connection
             x = x + attention_output
             
             # Apply universal patterns
-            x = self.universal_patterns.forward(x)
+            x = self.universal_patterns.forward(x)  # Make sure to use .forward() explicitly
             
             if training:
                 # Apply quantum dropout
                 x = self._quantum_dropout(x, rate=0.1)
         
-        # Project to vocabulary
-        logits = np.matmul(x, self.token_embeddings.T)
+        # Project to vocabulary - handle complex values
+        x_real = x.real
+        x_imag = x.imag
+        embeddings_real = self.token_embeddings.real
+        embeddings_imag = self.token_embeddings.imag
+        
+        # Compute complex matrix multiplication manually
+        logits_real = torch.matmul(x_real, embeddings_real.T) - torch.matmul(x_imag, embeddings_imag.T)
+        logits_imag = torch.matmul(x_real, embeddings_imag.T) + torch.matmul(x_imag, embeddings_real.T)
+        
+        logits = torch.complex(logits_real, logits_imag)
         return logits
     
     def _create_attention_mask(self, seq_length):
         """Create causal attention mask"""
-        mask = np.tril(np.ones((seq_length, seq_length)))
-        return mask[None, None, :, :]
+        # Create mask on correct device
+        mask = torch.tril(torch.ones((seq_length, seq_length), device="mps"))
+        # Add batch and head dimensions
+        mask = mask.unsqueeze(0).unsqueeze(0)
+        return mask
+    
+    def _calculate_angle(self, x):
+        """Calculate angle of complex number using MPS-supported operations"""
+        # Get real and imaginary parts
+        real = x.real
+        imag = x.imag
+        
+        # Use atan2 on CPU (temporarily) as it's not available on MPS
+        angle = torch.atan2(imag.cpu(), real.cpu())
+        return angle.to("mps")
     
     def _quantum_dropout(self, x, rate=0.1):
         """Apply quantum-inspired dropout"""
         if rate == 0:
             return x
         
-        # Create quantum-inspired mask
-        phase = np.angle(x)
-        mask = (np.random.random(x.shape) > rate) / (1 - rate)
-        return x * mask * np.exp(1j * phase)
+        # Split into real and imaginary parts for MPS-compatible operations
+        real = x.real
+        imag = x.imag
+        
+        # Calculate phase using our helper function
+        phase = self._calculate_angle(x)
+        
+        # Create dropout mask on the same device
+        mask = (torch.rand(x.shape, device="mps") > rate) / (1 - rate)
+        
+        # Apply mask and recombine with phase
+        magnitude = torch.sqrt(real**2 + imag**2) * mask
+        
+        # Recombine using magnitude and phase
+        new_real = magnitude * torch.cos(phase)
+        new_imag = magnitude * torch.sin(phase)
+        
+        return torch.complex(new_real, new_imag)
     
     def generate(self, prompt, max_length=100, temperature=0.8):
         """Generate text using the model"""
         # Encode prompt
         input_ids = self.tokenizer.encode(prompt)
-        input_ids = np.array(input_ids).reshape(1, -1)
+        input_ids = torch.tensor(input_ids).unsqueeze(0)
         
         generated = list(input_ids[0])
         
@@ -630,7 +777,7 @@ class EnhancedQuantumLLM:
             else:
                 context = generated
             
-            input_ids = np.array(context).reshape(1, -1)
+            input_ids = torch.tensor(context).unsqueeze(0)
             logits = self.forward(input_ids, training=False)
             next_token_logits = logits[0, -1]
             
@@ -639,15 +786,15 @@ class EnhancedQuantumLLM:
             probs = quantum_softmax(scaled_logits)
             
             # Ensure probabilities are real and normalized
-            probs = np.abs(probs)  # Take the magnitude to get real probabilities
-            probs /= np.sum(probs)  # Normalize to ensure they sum to 1
+            probs = torch.abs(probs)  # Take the magnitude to get real probabilities
+            probs /= torch.sum(probs)  # Normalize to ensure they sum to 1
             
             # Quantum-inspired sampling
-            phase = np.angle(probs + 1j * np.roll(probs, 1))
-            interference = np.abs(np.exp(1j * phase))
-            probs = interference / np.sum(interference)
+            phase = torch.angle(probs + 1j * torch.roll(probs, 1))
+            interference = torch.abs(torch.exp(1j * phase))
+            probs = interference / torch.sum(interference)
             
-            next_token = np.random.choice(len(probs), p=probs)
+            next_token = torch.multinomial(probs, 1)
             
             if next_token == self.tokenizer.vocab['<EOS>']:
                 break
@@ -682,92 +829,146 @@ def train_model(model, train_data_path, output_dir, config):
             batch_texts = texts[i:i + config['batch_size']]
             
             # Prepare batch
+            print("Tokenizing batch...")
+            start_time = time.time()
+            # Convert tokenizer output directly to tensor
             batch_tokens = [model.tokenizer.encode(text) for text in batch_texts]
             batch_tokens = [t for t in batch_tokens if len(t) > 1]
-            
+            end_time = time.time()
+            print(f"Tokenization time: {end_time - start_time:.4f} seconds")
+
             if not batch_tokens:
                 continue
-            
-            # Pad sequences
+
+            # Pad sequences using PyTorch operations
             max_len = min(max(len(t) for t in batch_tokens), model.config['max_sequence_length'] - 1)
-            batch = np.zeros((len(batch_tokens), max_len + 1), dtype=np.int32)
+            batch = torch.zeros((len(batch_tokens), max_len + 1), dtype=torch.long, device="mps")
+            
+            # Convert and assign tokens properly
             for j, tokens in enumerate(batch_tokens):
-                batch[j, :min(len(tokens), max_len + 1)] = tokens[:max_len + 1]
-            
+                token_tensor = torch.tensor(tokens[:max_len + 1], dtype=torch.long, device="mps")
+                batch[j, :len(token_tensor)] = token_tensor
+
+            print(f"Batch shape: {batch.shape}")
+
             # Forward pass and optimize
+            print("Forward pass...")
+            start_time = time.time()
             logits = model.forward(batch[:, :-1])
-            loss = compute_loss(logits, batch[:, 1:])  # Shift for next token prediction
+            end_time = time.time()
+            print(f"Forward pass time: {end_time - start_time:.4f} seconds")
+
+            print(f"Logits shape: {logits.shape}")
+
+            # Compute loss with proper tensor types
+            targets = batch[:, 1:].to(device="mps")
+            loss = compute_loss(logits, targets)
+
+            print("Optimizer step...")
+            start_time = time.time()
             optimizer.step(model, loss)
-            
+            end_time = time.time()
+            print(f"Optimizer step time: {end_time - start_time:.4f} seconds")
+
             if global_step % 100 == 0:
                 print(f"\nStep {global_step}, Loss: {loss:.4f}")
-            
+
             if global_step % config['save_steps'] == 0:
                 save_checkpoint(model, optimizer, global_step, output_dir)
-            
+
+            if global_step % 100 == 0:
+                print("\nChecking parameter health...")
+                optimizer._check_parameter_health(model.token_embeddings, "token_embeddings")
+                optimizer._check_parameter_health(model.position_embeddings, "position_embeddings")
+
             global_step += 1
-        
+
         # Save epoch checkpoint
         save_checkpoint(model, optimizer, f"epoch_{epoch+1}", output_dir)
-    
+
     print("Training completed!")
 
 def compute_loss(logits, targets):
     """Compute cross entropy loss with quantum phase alignment"""
+    # Ensure inputs are on the correct device
+    logits = logits.to("mps")
+    targets = targets.to("mps")
+    
     # Flatten logits and targets
     logits_flat = logits.reshape(-1, logits.shape[-1])
     targets_flat = targets.flatten()
     
+    # Split complex values
+    real = logits_flat.real
+    imag = logits_flat.imag
+    
     # Compute probabilities using quantum-inspired softmax
     probs = quantum_softmax(logits_flat)
     
+    # Move to CPU for complex operations
+    probs_cpu = probs.to("cpu")
+    targets_cpu = targets_flat.to("cpu")
+    indices = torch.arange(len(targets_flat)).to("cpu")
+    
     # Get probabilities for target tokens
-    target_probs = probs[np.arange(len(targets_flat)), targets_flat]
+    target_probs = probs_cpu[indices, targets_cpu]
     
     # Compute cross-entropy loss
-    loss = -np.mean(np.log(target_probs + 1e-10))
+    loss = -torch.mean(torch.log(torch.abs(target_probs) + 1e-10))
     
-    # Align quantum phases for gradient computation
-    phase_diff = np.angle(logits_flat) - np.angle(probs)
-    loss *= np.mean(np.abs(np.cos(phase_diff)))
+    # Align quantum phases using CPU for atan2
+    phase_diff = (torch.atan2(logits_flat.imag.cpu(), logits_flat.real.cpu()) - 
+                 torch.atan2(probs_cpu.imag, probs_cpu.real))
+    phase_factor = torch.mean(torch.abs(torch.cos(phase_diff)))
+    
+    # Move back to MPS for final computation
+    loss = loss.to("mps") * phase_factor.to("mps")
     
     return loss
 
 def quantum_softmax(logits):
     """Apply quantum-inspired softmax with phase alignment, stabilization, and optional clipping"""
-    # Compute magnitudes and phases
-    magnitudes = np.abs(logits)
-    phases = np.angle(logits)
+    # Split complex tensor into real and imaginary parts
+    real = logits.real
+    imag = logits.imag
+    
+    # Compute magnitudes using real and imaginary parts
+    magnitudes = torch.sqrt(real**2 + imag**2)
+    phases = torch.atan2(imag.cpu(), real.cpu()).to("mps")  # Handle phase calculation
     
     # Stabilize by subtracting the maximum magnitude
-    magnitudes -= np.max(magnitudes, axis=-1, keepdims=True)
+    magnitudes = magnitudes - torch.max(magnitudes, dim=-1, keepdim=True)[0]
     
     # Optional: Clip magnitudes to a reasonable range
-    magnitudes = np.clip(magnitudes, -10, 10)  # Adjust the range as needed
+    magnitudes = torch.clamp(magnitudes, -10, 10)
     
     # Apply softmax to magnitudes
-    exp_mags = np.exp(magnitudes)
-    probs = exp_mags / np.sum(exp_mags, axis=-1, keepdims=True)
+    exp_mags = torch.exp(magnitudes)
+    probs = exp_mags / torch.sum(exp_mags, dim=-1, keepdim=True)
     
     # Recombine with phases for quantum interference
-    probs = probs * np.exp(1j * phases)
+    real_probs = probs * torch.cos(phases)
+    imag_probs = probs * torch.sin(phases)
     
-    return probs
+    return torch.complex(real_probs, imag_probs)
 
 def save_checkpoint(model, optimizer, step, output_dir):
     """Save model checkpoint"""
     checkpoint = {
         'step': step,
         'model_state': {
-            'token_embeddings': model.token_embeddings,
-            'position_embeddings': model.position_embeddings,
+            'token_embeddings': model.token_embeddings.to("cpu"),  # Move to CPU for saving
+            'position_embeddings': model.position_embeddings.to("cpu"),
             'config': model.config
         },
-        'optimizer_state': optimizer.__dict__
+        'optimizer_state': {
+            key: value.to("cpu") if isinstance(value, torch.Tensor) else value
+            for key, value in optimizer.__dict__.items()
+        }
     }
     
-    save_path = output_dir / f'checkpoint_{step}.npz'
-    np.savez(save_path, **checkpoint)
+    save_path = output_dir / f'checkpoint_{step}.pt'  # Use .pt extension for PyTorch
+    torch.save(checkpoint, save_path)
 
 ### Example usage
 if __name__ == "__main__":
