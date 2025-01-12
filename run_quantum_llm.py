@@ -1,5 +1,6 @@
 import numpy as np
 from sample_qllm import EnhancedQuantumLLM, train_model
+from generate_text import generate  # Import the working generation function
 
 def main():
     # Configuration
@@ -37,12 +38,16 @@ def main():
         config=config
     )
     
-    # Generate text
+    # Generate text using the working generation code
     print("\nGenerating text...")
-    prompt = "Quantum computing"
-    generated_text = model.generate(prompt, max_length=50)
-    print(f"\nPrompt: {prompt}")
-    print(f"Generated text:\n{generated_text}")
+    prompts = [
+        "Quantum computing is",
+        "The future of AI",
+        "In the quantum realm",
+    ]
+    
+    for prompt in prompts:
+        generate(model, prompt, max_length=50)
 
 if __name__ == "__main__":
     main() 
