@@ -960,7 +960,7 @@ def get_default_config():
         'learning_rate': 1e-4,
 
         # Directory for saving model checkpoints
-        'output_dir': 'quantum_checkpoints',
+        'output_dir': 'quantum_checkpoints_4',
 
         # Pre-trained tokenizer to use
         'tokenizer_name': 'bert-base-uncased',
@@ -1020,7 +1020,7 @@ def run_from_cli():
     # Model loading/saving
     parser.add_argument('--checkpoint', type=str,
                       help='Path to model checkpoint file')
-    parser.add_argument('--output_dir', type=str, default='quantum_checkpoints',
+    parser.add_argument('--output_dir', type=str, default='quantum_checkpoints_4',
                       help='Directory for saving checkpoints (default: quantum_checkpoints)')
     
     args = parser.parse_args()
@@ -1044,7 +1044,7 @@ def run_from_cli():
         print("Training model...")
         print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}")
         print(f"Learning rate: {args.learning_rate}, Max samples: {args.max_samples}")
-        main(mode='train', config=config, checkpoint=args.checkpoint)
+        # main(mode='train', config=config, checkpoint=args.checkpoint)
     else:
         print("Generating text...")
         print(f"Prompt: {args.prompt}")
