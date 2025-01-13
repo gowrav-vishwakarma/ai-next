@@ -529,9 +529,12 @@ class FastQuantumLLM(nn.Module):
         logits = torch.tanh(self.output_proj(x))
         
         if return_loss and input_ids is not None:
-            # Compute stable loss
+            # Compute stable loss with proper bounds checking
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = input_ids[..., 1:].contiguous()
+            
+            # Clamp labels to valid vocabulary range
+            shift_labels = torch.clamp(shift_labels, 0, self.config['vocab_size'] - 1)
             
             # Use stable cross entropy
             loss = F.cross_entropy(
@@ -587,6 +590,7 @@ class TextDataset(Dataset):
         self.dataset = list(dataset)
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.vocab_size = tokenizer.vocab_size
     
     def __len__(self):
         return len(self.dataset)
@@ -604,9 +608,12 @@ class TextDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Remove batch dimension added by tokenizer
+        # Ensure token ids are within vocabulary bounds
+        input_ids = encoding['input_ids'].squeeze(0)
+        input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
+        
         return {
-            'input_ids': encoding['input_ids'].squeeze(0),
+            'input_ids': input_ids,
             'attention_mask': encoding['attention_mask'].squeeze(0)
         }
 
@@ -635,29 +642,38 @@ def train_model(model, config):
     if config.get('max_samples'):
         dataset = dataset.take(config['max_samples'])
     
-    # Scan dataset to extend vocabulary if needed
+    # Scan dataset to build vocabulary
     print("Scanning dataset to build vocabulary...")
+    vocab_words = set()
     for item in tqdm(dataset):
         text = item['text'].lower().split()
-        model.tokenizer.extend_vocabulary(text)
+        vocab_words.update(text)
     
+    # Update vocabulary
+    model.tokenizer.extend_vocabulary(vocab_words)
     print(f"Final vocabulary size: {model.tokenizer.vocab_size}")
     
-    # Resize token embedding if vocabulary was extended
-    if model.token_embedding.num_embeddings < model.tokenizer.vocab_size:
-        new_embeddings = nn.Embedding(
-            model.tokenizer.vocab_size,
-            config['dim']
-        )
-        # Copy existing embeddings
-        new_embeddings.weight.data[:model.token_embedding.num_embeddings] = model.token_embedding.weight.data
-        # Initialize new embeddings
-        nn.init.normal_(
-            new_embeddings.weight.data[model.token_embedding.num_embeddings:],
-            mean=0.0,
-            std=model.scale
-        )
-        model.token_embedding = new_embeddings.to(model.device)
+    # Update model config with new vocab size
+    model.config['vocab_size'] = model.tokenizer.vocab_size
+    
+    # Resize token embedding and output projection
+    new_embeddings = nn.Embedding(
+        model.tokenizer.vocab_size,
+        config['dim']
+    ).to(model.device)
+    new_embeddings.weight.data[:model.token_embedding.num_embeddings] = model.token_embedding.weight.data
+    nn.init.normal_(
+        new_embeddings.weight.data[model.token_embedding.num_embeddings:],
+        mean=0.0,
+        std=model.scale
+    )
+    model.token_embedding = new_embeddings
+    
+    # Update output projection
+    model.output_proj = nn.Linear(
+        config['dim'],
+        model.tokenizer.vocab_size
+    ).to(model.device)
     
     # Create training dataset
     train_dataset = TextDataset(
