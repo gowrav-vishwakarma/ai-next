@@ -15,7 +15,8 @@ import torch.backends.mps
 import gc
 import argparse
 import sys
-from quantum_language_core import QuantumTokenizer, QuantumLanguageStructure
+import re
+# from quantum_language_core import QuantumTokenizer, QuantumLanguageStructure
 
 # Determine the best available device
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -25,6 +26,296 @@ print(f"Using device: {device}")
 if device == "mps":
     os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.5'  # Use 50% of available memory
     os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO'] = '0.3'   # Free memory when usage goes below 30%
+
+class QuantumTokenizer:
+    """Quantum-inspired tokenizer using wave patterns and universal constants"""
+    def __init__(self, vocab_size=None):  # Make vocab_size optional
+        # Initialize vocabulary first to determine actual size
+        self.vocab = self._initialize_vocabulary()
+        # Set vocab_size based on actual vocabulary
+        self.vocab_size = len(self.vocab)
+        
+        self.phi = (1 + np.sqrt(5)) / 2
+        self.e = np.e
+        self.pi = np.pi
+        
+        # Initialize quantum patterns
+        self.token_patterns = self._initialize_quantum_patterns()
+        self.reverse_vocab = {v: k for k, v in self.vocab.items()}
+        self.char_waves = self._initialize_char_waves()
+        self.eos_token_id = 3  # <EOS> token
+        self.padding_side = 'right'
+        self.truncation_side = 'right'
+        self.model_max_length = 512
+    
+    def _initialize_quantum_patterns(self):
+        patterns = {}
+        # Use first 100 prime numbers for base patterns
+        primes = self._generate_primes(100)
+        
+        for i, prime in enumerate(primes):
+            # Create unique phase using golden ratio and prime numbers
+            phase = 2 * self.pi * (i / len(primes)) * self.phi
+            patterns[prime] = np.exp(1j * phase)
+        return patterns
+    
+    def _generate_primes(self, n):
+        """Generate first n prime numbers"""
+        primes = []
+        num = 2
+        while len(primes) < n:
+            if all(num % prime != 0 for prime in primes):
+                primes.append(num)
+            num += 1
+        return primes
+    
+    def _initialize_vocabulary(self):
+        """Initialize vocabulary using wave-like patterns"""
+        vocab = {
+            '<PAD>': 0,
+            '<UNK>': 1,
+            '<BOS>': 2,
+            '<EOS>': 3,
+            '<MASK>': 4
+        }
+        
+        # Add common words - this will be our initial known vocabulary
+        common_words = """the be to of and a in that have I it for not on with he as you do at this but his by from they we say her she or an will my one all would there their what so up out if about who get which go me when make can like time no just him know take people into year your good some could them see other than then now look only come its over think also back after use two how our work first well way even new want because any these give day most us""".split()
+        
+        # Add each word to vocabulary
+        for word in common_words:
+            vocab[word] = len(vocab)
+            
+        return vocab
+    
+    def extend_vocabulary(self, new_words):
+        """Extend vocabulary with new words"""
+        for word in new_words:
+            if word not in self.vocab:
+                self.vocab[word] = len(self.vocab)
+        
+        # Update vocab size and reverse vocab
+        self.vocab_size = len(self.vocab)
+        self.reverse_vocab = {v: k for k, v in self.vocab.items()}
+        return self.vocab_size
+    
+    def _initialize_char_waves(self):
+        """Initialize wave patterns for characters"""
+        waves = {}
+        for i, char in enumerate(self.vocab):
+            # Create unique wave pattern for each character
+            freq = (i + 1) * self.phi
+            phase = 2 * self.pi * (i / len(self.vocab))
+            waves[char] = lambda x, f=freq, p=phase: np.sin(f * x + p)
+        return waves
+    
+    def encode(self, text, return_tensors='pt', **kwargs):
+        """Enhanced encode method with word-level tokenization"""
+        tokens = self._quantum_tokenize(text)
+        
+        # Get token indices
+        indices = []
+        for token in tokens:
+            idx = self.vocab.get(token, self.vocab['<UNK>'])  # Use UNK token id for unknown words
+            indices.append(idx)
+        
+        # Convert to tensor if requested
+        if return_tensors == 'pt':
+            return torch.tensor([indices], dtype=torch.long)
+        elif return_tensors == 'wave':
+            # Return wave patterns for quantum processing
+            encoded = torch.zeros((len(tokens), self.vocab_size), dtype=torch.float32)
+            for i, token in enumerate(tokens):
+                if token in self.vocab:
+                    pattern = self._create_token_pattern(token)
+                    encoded[i] = torch.tensor(pattern)
+                else:
+                    encoded[i] = self._create_unknown_pattern(token)
+            return encoded
+        return indices
+    
+    def decode(self, token_ids):
+        """Decode token ids back to text"""
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.cpu().tolist()
+            
+        text = []
+        for idx in token_ids:
+            token = self.reverse_vocab.get(idx, '<UNK>')
+            if token not in ['<PAD>', '<UNK>', '<BOS>', '<EOS>', '<MASK>']:
+                text.append(token)
+        
+        return ' '.join(text)
+    
+    def _quantum_tokenize(self, text):
+        """Tokenize text using word-level tokenization with known words"""
+        # Normalize text
+        text = text.lower().strip()
+        
+        # Split into words
+        words = text.split()
+        
+        # Convert to known tokens or UNK
+        tokens = []
+        for word in words:
+            # Only use known words from vocabulary, otherwise use UNK
+            if word in self.vocab:
+                tokens.append(word)
+            else:
+                tokens.append('<UNK>')
+        
+        return tokens
+    
+    def _fibonacci_group(self, tokens):
+        """Group tokens using Fibonacci sequence"""
+        fib = [1, 1]
+        while fib[-1] < len(tokens):
+            fib.append(fib[-1] + fib[-2])
+        
+        grouped = []
+        i = 0
+        while i < len(tokens):
+            # Use Fibonacci numbers to determine group sizes
+            size = min(fib[int(np.log(len(tokens)-i)/np.log(self.phi))], len(tokens)-i)
+            group = ''.join(tokens[i:i+size]).strip()
+            if group:
+                grouped.append(group)
+            i += size
+        
+        return grouped
+    
+    def _create_token_pattern(self, token):
+        """Create quantum wave pattern for token"""
+        pattern = np.zeros(self.vocab_size)
+        idx = self.vocab.get(token, 1)  # Use 1 for UNK
+        
+        # Create interference pattern
+        for i in range(self.vocab_size):
+            phase = 2 * self.pi * (i - idx) / self.vocab_size
+            pattern[i] = np.cos(phase * self.phi) * np.exp(-abs(i-idx)/self.vocab_size)
+        
+        return pattern
+    
+    def _create_unknown_pattern(self, token):
+        """Create pattern for unknown tokens using quantum superposition"""
+        pattern = np.zeros(self.vocab_size)
+        
+        # Create superposition of similar known tokens
+        for known_token, idx in self.vocab.items():
+            similarity = self._quantum_similarity(token, known_token)
+            phase = 2 * self.pi * similarity * self.phi
+            pattern[idx] = np.cos(phase) * similarity
+        
+        return torch.tensor(pattern / np.sqrt(np.sum(pattern**2) + 1e-8))
+    
+    def _quantum_similarity(self, token1, token2):
+        """Compute quantum-inspired similarity between tokens"""
+        # Use Levenshtein distance with quantum weights
+        distance = self._weighted_levenshtein(str(token1), str(token2))
+        return np.exp(-distance * self.phi)
+    
+    def _weighted_levenshtein(self, s1, s2):
+        """Compute weighted Levenshtein distance"""
+        if len(s1) < len(s2):
+            return self._weighted_levenshtein(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                # Use golden ratio for insertions/deletions
+                insertions = previous_row[j + 1] + 1/self.phi
+                deletions = current_row[j] + 1/self.phi
+                # Use e for substitutions
+                substitutions = previous_row[j] + (0 if c1 == c2 else 1/self.e)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+    
+    def __call__(self, text, padding=True, truncation=True, max_length=None, return_tensors=None):
+        """Make the tokenizer callable like HuggingFace tokenizers"""
+        if isinstance(text, str):
+            text = [text]
+        
+        # Process each text in the batch
+        batch_encoding = {
+            'input_ids': [],
+            'attention_mask': []
+        }
+        
+        max_length = max_length or self.model_max_length
+        
+        for t in text:
+            # Encode text to get token ids
+            token_ids = self.encode(t, return_tensors=None)  # Get raw indices
+            
+            # Truncate if needed
+            if truncation and len(token_ids) > max_length:
+                if self.truncation_side == 'right':
+                    token_ids = token_ids[:max_length]
+                else:
+                    token_ids = token_ids[-max_length:]
+            
+            # Create attention mask
+            attention_mask = [1] * len(token_ids)
+            
+            # Pad if needed
+            if padding and len(token_ids) < max_length:
+                pad_length = max_length - len(token_ids)
+                if self.padding_side == 'right':
+                    token_ids = token_ids + [0] * pad_length
+                    attention_mask = attention_mask + [0] * pad_length
+                else:
+                    token_ids = [0] * pad_length + token_ids
+                    attention_mask = [0] * pad_length + attention_mask
+            
+            batch_encoding['input_ids'].append(token_ids)
+            batch_encoding['attention_mask'].append(attention_mask)
+        
+        # Convert to tensors if requested
+        if return_tensors == 'pt':
+            batch_encoding['input_ids'] = torch.tensor(batch_encoding['input_ids'], dtype=torch.long)
+            batch_encoding['attention_mask'] = torch.tensor(batch_encoding['attention_mask'], dtype=torch.long)
+        
+        return batch_encoding
+
+class QuantumLanguageStructure:
+    """Handle natural language structure using quantum-inspired patterns"""
+    def __init__(self):
+        self.phi = (1 + np.sqrt(5)) / 2
+        self.fib_sequence = self._generate_fibonacci(512)  # Increase size to handle longer sequences
+        # Move to the correct device during initialization
+        self.fib_sequence = self.fib_sequence.to(device)
+    
+    def _generate_fibonacci(self, n):
+        """Generate Fibonacci sequence"""
+        fib = [1, 1]
+        for i in range(2, n):
+            fib.append(fib[i-1] + fib[i-2])
+        return torch.tensor(fib, dtype=torch.float32)
+    
+    def apply_structure(self, tokens):
+        """Apply natural language patterns based on Fibonacci ratios"""
+        B, L, D = tokens.shape
+        
+        # Ensure we have enough Fibonacci numbers
+        if L > len(self.fib_sequence):
+            self.fib_sequence = self._generate_fibonacci(L * 2).to(tokens.device)
+        
+        # Get pattern for this sequence length with scaling
+        pattern = (self.fib_sequence[:L] / (self.fib_sequence[L-1] + 1e-8))
+        pattern = torch.clamp(pattern, -5, 5)  # Prevent extreme values
+        pattern = pattern.to(tokens.device)
+        
+        # Reshape pattern to match token dimensions
+        pattern = pattern.view(1, L, 1).expand(B, -1, D)
+        
+        # Apply pattern with scaling
+        return tokens * pattern * 0.1 
 
 class FastQuantumOps:
     """Stable quantum operations using bounded functions"""
@@ -151,24 +442,20 @@ class FastQuantumLLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.device = device # Use the global device variable
+        self.device = device
         
-        # Initialize with smaller values
+        # Initialize tokenizer first to get actual vocab size
+        self.tokenizer = QuantumTokenizer()
+        
+        # Update config with actual vocab size
+        self.config['vocab_size'] = self.tokenizer.vocab_size
+        
+        # Initialize rest of the model with actual vocab size
         self.scale = 1.0 / math.sqrt(config['dim'])
-        
-        # Ensure vocab_size is set
-        if 'vocab_size' not in config:
-            config['vocab_size'] = 32000  # Default size if not specified
-        
-        # Initialize quantum tokenizer
-        self.tokenizer = QuantumTokenizer(vocab_size=config['vocab_size'])
-        
-        # Add quantum language structure
-        self.language_structure = QuantumLanguageStructure()
         
         # Embeddings with proper initialization
         self.token_embedding = nn.Embedding(
-            config['vocab_size'], 
+            self.config['vocab_size'], 
             config['dim']
         )
         # Initialize embeddings with smaller values
@@ -336,9 +623,8 @@ def clear_memory():
 def train_model(model, config):
     """Train the model using HuggingFace dataset with memory optimizations"""
     print("Loading dataset...")
-    clear_memory()  # Clear memory before starting
+    clear_memory()
     
-    # Load dataset with memory efficiency
     dataset = load_dataset(
         config['dataset_name'],
         config['dataset_config'],
@@ -348,6 +634,30 @@ def train_model(model, config):
     
     if config.get('max_samples'):
         dataset = dataset.take(config['max_samples'])
+    
+    # Scan dataset to extend vocabulary if needed
+    print("Scanning dataset to build vocabulary...")
+    for item in tqdm(dataset):
+        text = item['text'].lower().split()
+        model.tokenizer.extend_vocabulary(text)
+    
+    print(f"Final vocabulary size: {model.tokenizer.vocab_size}")
+    
+    # Resize token embedding if vocabulary was extended
+    if model.token_embedding.num_embeddings < model.tokenizer.vocab_size:
+        new_embeddings = nn.Embedding(
+            model.tokenizer.vocab_size,
+            config['dim']
+        )
+        # Copy existing embeddings
+        new_embeddings.weight.data[:model.token_embedding.num_embeddings] = model.token_embedding.weight.data
+        # Initialize new embeddings
+        nn.init.normal_(
+            new_embeddings.weight.data[model.token_embedding.num_embeddings:],
+            mean=0.0,
+            std=model.scale
+        )
+        model.token_embedding = new_embeddings.to(model.device)
     
     # Create training dataset
     train_dataset = TextDataset(
@@ -434,49 +744,44 @@ def save_checkpoint(model, optimizer, epoch, output_dir):
     path.mkdir(exist_ok=True)
     torch.save(checkpoint, path / f'checkpoint_epoch_{epoch}.pt')
 
-if __name__ == "__main__":
-    # Add argument parsing
-    parser = argparse.ArgumentParser(description='''
-    Quantum LLM - Train or Generate
+def main(mode, config, prompt=None, checkpoint=None, max_length=50, temperature=0.1):
+    # Initialize model with proper order
+    model = FastQuantumLLM(config)  # First create model
+    model = model.to(model.device)  # Then move to device
     
-    Examples:
-        # Train the model:
-        python sample_qllm_optimized.py --mode train
+    if mode == 'train':
+        # Train model using HuggingFace dataset
+        train_model(model, config)
+    else:
+        # Load checkpoint if provided
+        if checkpoint:
+            checkpoint_path = Path(checkpoint)
+            if checkpoint_path.exists():
+                print(f"Loading checkpoint from {checkpoint_path}")
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                print(f"Warning: Checkpoint {checkpoint_path} not found. Using untrained model.")
         
-        # Generate text with default settings:
-        python sample_qllm_optimized.py --mode generate --prompt "Once in India"
+        # Generate text
+        if not prompt:
+            print("Error: --prompt is required when mode is 'generate'")
+            return
         
-        # Generate with a checkpoint:
-        python sample_qllm_optimized.py --mode generate --checkpoint quantum_checkpoints/checkpoint_epoch_2.pt --prompt "The future"
-    ''', formatter_class=argparse.RawDescriptionHelpFormatter)
-    
-    parser.add_argument('--mode', type=str, choices=['train', 'generate'],
-                      help='Mode to run: train or generate')
-    parser.add_argument('--prompt', type=str,
-                      help='Prompt for text generation (required for generate mode)')
-    parser.add_argument('--checkpoint', type=str,
-                      help='Path to checkpoint file for generation')
-    parser.add_argument('--max_length', type=int, default=50,
-                      help='Maximum length of generated text (default: 50)')
-    parser.add_argument('--temperature', type=float, default=0.1,
-                      help='Temperature for text generation (default: 0.1)')
-    
-    # Show help if no arguments are provided
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(1)
-    
-    args = parser.parse_args()
-    
-    # Validate arguments
-    if args.mode == 'generate' and not args.prompt:
-        parser.error("--prompt is required when mode is 'generate'")
-    
-    # Configuration
-    config = {
-        # Add vocab_size at the top of config
-        'vocab_size': 32000,  # Standard vocabulary size
+        print(f"\nGenerating text with prompt: {prompt}")
+        print(f"Temperature: {temperature}, Max Length: {max_length}")
         
+        generated_text = model.generate(
+            prompt,
+            max_length=max_length,
+            temperature=temperature,
+            top_k=100
+        )
+        print(f"\nGenerated text:\n{generated_text}")
+
+def get_default_config():
+    """Return default configuration for the model"""
+    return {
         # Dimension of the model's embeddings and hidden states
         # Higher = more expressive but more memory/compute intensive
         # Lower = faster but less capable
@@ -553,33 +858,74 @@ if __name__ == "__main__":
         # Range: 1-16, helps simulate larger batch sizes
         'accumulation_steps': 8
     }
+
+def run_from_cli():
+    """Function to handle command-line interface"""
+    parser = argparse.ArgumentParser(description='Quantum Language Model Training and Generation')
+    parser.add_argument('--mode', type=str, choices=['train', 'generate'], required=True,
+                      help='Mode to run the model: train or generate')
     
-    # Initialize model with proper order
-    model = FastQuantumLLM(config)  # First create model
-    model = model.to(model.device)  # Then move to device
+    # Generation arguments
+    parser.add_argument('--prompt', type=str,
+                      help='Text prompt for generation (required if mode is generate)')
+    parser.add_argument('--max_length', type=int, default=50,
+                      help='Maximum length of generated text (default: 50)')
+    parser.add_argument('--temperature', type=float, default=0.7,
+                      help='Temperature for text generation (default: 0.7)')
     
+    # Training arguments
+    parser.add_argument('--epochs', type=int, default=3,
+                      help='Number of training epochs (default: 3)')
+    parser.add_argument('--batch_size', type=int, default=2,
+                      help='Batch size for training (default: 2)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                      help='Learning rate (default: 1e-4)')
+    parser.add_argument('--max_samples', type=int, default=200,
+                      help='Maximum number of training samples (default: 200)')
+    
+    # Model loading/saving
+    parser.add_argument('--checkpoint', type=str,
+                      help='Path to model checkpoint file')
+    parser.add_argument('--output_dir', type=str, default='quantum_checkpoints',
+                      help='Directory for saving checkpoints (default: quantum_checkpoints)')
+    
+    args = parser.parse_args()
+
+    # Validate arguments
+    if args.mode == 'generate' and not args.prompt:
+        parser.error("--prompt is required when mode is 'generate'")
+
+    # Get default config and update with CLI arguments
+    config = get_default_config()
+    config.update({
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'learning_rate': args.learning_rate,
+        'output_dir': args.output_dir,
+        'max_samples': args.max_samples,
+    })
+
+    # Run the model
     if args.mode == 'train':
-        # Train model using HuggingFace dataset
-        train_model(model, config)
+        print("Training model...")
+        print(f"Epochs: {args.epochs}, Batch size: {args.batch_size}")
+        print(f"Learning rate: {args.learning_rate}, Max samples: {args.max_samples}")
+        main(mode='train', config=config, checkpoint=args.checkpoint)
     else:
-        # Load checkpoint if provided
-        if args.checkpoint:
-            checkpoint_path = Path(args.checkpoint)
-            if checkpoint_path.exists():
-                print(f"Loading checkpoint from {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=device)
-                model.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                print(f"Warning: Checkpoint {checkpoint_path} not found. Using untrained model.")
-        
-        # Generate text
-        print(f"\nGenerating text with prompt: {args.prompt}")
-        print(f"Temperature: {args.temperature}, Max Length: {args.max_length}")
-        
-        generated_text = model.generate(
-            args.prompt,
-            max_length=args.max_length,
-            temperature=args.temperature,
-            top_k=100
-        )
-        print(f"\nGenerated text:\n{generated_text}") 
+        print("Generating text...")
+        print(f"Prompt: {args.prompt}")
+        print(f"Temperature: {args.temperature}, Max length: {args.max_length}")
+        main(mode='generate', 
+             config=config,
+             prompt=args.prompt,
+             checkpoint=args.checkpoint,
+             max_length=args.max_length,
+             temperature=args.temperature)
+
+if __name__ == "__main__":
+    # Only run CLI handling when script is run directly
+    try:
+        run_from_cli()
+    except SystemExit:
+        # Ignore SystemExit in interactive environments
+        pass 

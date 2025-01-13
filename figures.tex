@@ -1,0 +1,25 @@
+\documentclass{article}
+\usepackage{tikz}
+\usepackage{pgfplots}
+
+\begin{document}
+
+% Figure 1: Phase Space Representation
+\begin{figure}[h]
+\begin{tikzpicture}
+    % Add axis
+    \draw[->] (0,0) -- (10,0) node[right]{Static Meaning};
+    \draw[->] (0,0) -- (0,8) node[above]{Dynamic Relationships};
+    
+    % Add points
+    \fill[blue] (3,3) circle (2pt) node[right]{Word A};
+    \fill[red] (7,5) circle (2pt) node[right]{Word B};
+    \fill[green] (5,6) circle (2pt) node[right]{Word C};
+\end{tikzpicture}
+\caption{Phase Space Representation. The x-axis represents the static meaning component, and the y-axis represents the dynamic relationship component. Each word is represented as a point in this space.}
+\end{figure}
+
+% Figure 2: Interference Patterns
+[Similar TikZ code for other figures...]
+
+\end{document} 

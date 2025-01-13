@@ -4,6 +4,9 @@ import math
 from collections import defaultdict
 import re
 
+# Define the global device variable
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+
 class QuantumTokenizer:
     """Quantum-inspired tokenizer using wave patterns and universal constants"""
     def __init__(self, vocab_size=32000):
@@ -255,8 +258,8 @@ class QuantumLanguageStructure:
     def __init__(self):
         self.phi = (1 + np.sqrt(5)) / 2
         self.fib_sequence = self._generate_fibonacci(512)  # Increase size to handle longer sequences
-        # Move to MPS device during initialization
-        self.fib_sequence = self.fib_sequence.to("mps")
+        # Move to the correct device during initialization
+        self.fib_sequence = self.fib_sequence.to(device)
     
     def _generate_fibonacci(self, n):
         """Generate Fibonacci sequence"""

@@ -1,0 +1,27 @@
+\ProvidesPackage{journal_style}
+
+% Page layout
+\setlength{\textwidth}{7.0in}
+\setlength{\textheight}{9.25in}
+\setlength{\columnsep}{0.25in}
+\setlength{\topmargin}{0in}
+\setlength{\headheight}{0in}
+\setlength{\headsep}{0in}
+\setlength{\parskip}{1ex}
+\setlength{\oddsidemargin}{-0.25in}
+\setlength{\evensidemargin}{-0.25in}
+
+% Section formatting
+\renewcommand{\section}{\@startsection{section}{1}{\z@}
+    {-3.5ex \@plus -1ex \@minus -.2ex}
+    {2.3ex \@plus.2ex}
+    {\normalfont\Large\bfseries}}
+
+% Figure and table captions
+\renewcommand{\figurename}{Fig.}
+\renewcommand{\tablename}{Table}
+
+% Bibliography style
+\bibliographystyle{ieeetr}
+
+\endinput 

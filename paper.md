@@ -197,21 +197,70 @@ Our initial implementation demonstrates:
 
 However, we emphasize that extensive evaluation and comparison with existing approaches remain as future work.
 
-## 6. Discussion
+## 6. Comparative Analysis and Discussion
 
-### 6.1 Limitations and Challenges
+### 6.1 Traditional vs. Quantum-Inspired Approaches
 
-Several important challenges remain in translating the ideal quantum-inspired framework to practical implementations:
-- Adaptation of complex quantum operations to real-valued computations, requiring careful approximations and trade-offs.
-- Balance between theoretical ideals and practical constraints, necessitating compromises to achieve computational feasibility on current hardware.
-- Trade-offs between expressiveness and efficiency, as simplified operations might limit the model's ability to capture complex linguistic nuances.
+#### 6.1.1 Traditional Transformer Architecture
+In traditional transformer-based language models, token processing occurs through two separate mechanisms:
+1. **Token Embeddings**: Static vectors that capture semantic properties
+   - Fixed representation of word meaning
+   - Learned during training
+   - Limited contextual flexibility
 
-### 6.2 Future Directions
+2. **Positional Encodings**: Separate vectors based on sequence position
+   - Usually implemented using sine/cosine functions
+   - Added to token embeddings: Final_embedding = Token_embedding + Positional_encoding
+   - Primarily captures absolute position information
 
-Promising areas for future research include:
-- Development of hardware-specific optimizations to better leverage the underlying structure of the proposed operations.
-- Exploration of alternative phase-space representations that might offer better trade-offs between expressiveness and computational cost.
-- Investigation of hybrid classical-quantum approaches, where certain components of the model might be implemented on actual quantum hardware in the future.
+#### 6.1.2 Quantum-Inspired Framework
+Our approach unifies these aspects in a quantum-inspired phase space representation:
+1. **Static Meaning Component** (Position-like):
+   - Captures inherent semantic content
+   - Analogous to particle position in quantum mechanics
+   - Integrated with dynamic components
+
+2. **Dynamic Relationships Component** (Momentum-like):
+   - Represents word's potential to influence context
+   - Analogous to particle momentum
+   - Enables richer contextual interactions
+
+### 6.2 Key Innovations and Advantages
+
+#### 6.2.1 Unified Representation
+Unlike the additive approach in traditional transformers, our framework provides:
+- Simultaneous encoding of meaning and relationship potential
+- Natural interaction through wave-like interference
+- Intrinsic coupling between static and dynamic aspects
+
+#### 6.2.2 Enhanced Contextual Processing
+The quantum-inspired approach enables:
+- Dynamic word interactions through phase relationships
+- Context-sensitive meaning adaptation
+- Natural modeling of linguistic interference patterns
+
+#### 6.2.3 Computational Benefits
+Our framework offers:
+- Bounded operations through quantum-inspired constraints
+- Efficient phase-based information encoding
+- Natural regularization through unitary-inspired operations
+
+### 6.3 Future Directions
+
+While our current implementation demonstrates the potential of this approach, several promising directions remain for exploration:
+1. Hardware optimization for phase-based computations
+2. Integration with emerging quantum computing platforms
+3. Extension to multi-modal language understanding tasks
+
+### 6.4 Broader Implications
+
+This fundamental shift in token representation and processing not only addresses current limitations in language modeling but also suggests new directions for:
+1. More nuanced language understanding systems
+2. Efficient contextual processing
+3. Biologically-inspired natural language processing
+
+The quantum-inspired framework represents a step toward more sophisticated and context-aware language models, moving beyond the limitations of current architectures while maintaining computational feasibility.
+
 
 ## 7. Conclusion
 
