@@ -253,16 +253,22 @@ def train_step(
 
 def generate(
     model: SimpleQuantumLLM,
-    prompt: torch.Tensor,
+    tokenizer: AutoTokenizer,
+    prompt: str,
     max_length: int = 100,
     temperature: float = 0.7
-) -> torch.Tensor:
+) -> str:
     """
-    Simple generation function
+    Simple generation function with tokenization
     """
     model.eval()
+    
+    # Tokenize the input prompt
+    inputs = tokenizer(prompt, return_tensors="pt")
+    input_ids = inputs["input_ids"].to(device)
+    
     with torch.no_grad():
-        generated = prompt
+        generated = input_ids
         
         for _ in range(max_length):
             # Get predictions
@@ -277,10 +283,12 @@ def generate(
             generated = torch.cat([generated, next_token], dim=1)
             
             # Optional: Check for end token
-            if next_token.item() == 0:  # Assuming 0 is end token
+            if next_token.item() == tokenizer.sep_token_id:
                 break
-                
-        return generated
+        
+        # Decode the generated tokens back to text
+        generated_text = tokenizer.decode(generated[0], skip_special_tokens=True)
+        return generated_text
 
 def load_wikitext_dataset(max_samples=None):
     """Load and preprocess the Wikitext dataset"""
@@ -403,10 +411,13 @@ def main(args):
 
     elif args.mode == 'generate':
         # Generate text from a prompt
-        prompt = torch.tensor(args.prompt).to(device)
-        if len(prompt.shape) == 1:
-            prompt = prompt.unsqueeze(0)
-        generated_text = generate(model, prompt, max_length=args.max_length, temperature=args.temperature)
+        generated_text = generate(
+            model, 
+            AutoTokenizer.from_pretrained("bert-base-uncased"),
+            args.prompt,
+            max_length=args.max_length, 
+            temperature=args.temperature
+        )
         print("Generated text:", generated_text)
 
 if __name__ == "__main__":
