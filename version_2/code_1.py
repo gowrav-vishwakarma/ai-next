@@ -9,6 +9,8 @@ from tqdm import tqdm
 import time
 import argparse
 from typing import List, Dict, Tuple, Optional
+import os
+import shutil
 
 from library.quantum_ml import BasicQuantumAttention, QuantumEmbedding, QuantumTokenizer, SimpleQuantumState, create_quantum_tokenizer
 
@@ -155,6 +157,72 @@ def load_quantum_wikitext(max_samples: Optional[int] = None):
     
     return tokenized_dataset, tokenizer
 
+def save_checkpoint(model: QuantumLLM, optimizer, epoch: int, loss: float, args, path: str = "checkpoints"):
+    """Save model checkpoint"""
+    import os
+    import shutil
+    
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(path, exist_ok=True)
+    
+    # Create checkpoint filename with epoch and loss
+    checkpoint_file = os.path.join(path, f"model_epoch_{epoch}_loss_{loss:.4f}.pt")
+    
+    # Save model state dict separately
+    model_state = model.state_dict()
+    torch.save(model_state, checkpoint_file + '.model')
+    
+    # Save other info separately
+    metadata = {
+        'epoch': epoch,
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+        'args': vars(args),  # Convert args to dict
+        'model_version': '1.0'
+    }
+    torch.save(metadata, checkpoint_file + '.meta')
+    
+    # Save epoch-specific checkpoint
+    print(f"\nSaving checkpoint to {checkpoint_file}")
+    
+    # Copy this checkpoint as the latest checkpoint
+    latest_file = os.path.join(path, "checkpoint_last")
+    shutil.copy2(checkpoint_file + '.model', latest_file + '.model')
+    shutil.copy2(checkpoint_file + '.meta', latest_file + '.meta')
+    print(f"Updated latest checkpoint at {latest_file}")
+
+def load_checkpoint(model: QuantumLLM, checkpoint_path: str, device: str):
+    """Load model checkpoint"""
+    print(f"\nLoading checkpoint from {checkpoint_path}")
+    
+    try:
+        # Load model state dict
+        model_path = checkpoint_path + '.model'
+        meta_path = checkpoint_path + '.meta'
+        
+        # Load model weights safely
+        model_state = torch.load(model_path, map_location=device, weights_only=True)
+        model.load_state_dict(model_state)
+        
+        # Load metadata
+        metadata = torch.load(meta_path, map_location=device, weights_only=True)
+        
+        # Version check
+        if 'model_version' not in metadata:
+            print("Warning: Loading checkpoint from older version")
+        
+        return model, metadata
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+        return model, None
+
+def get_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
+    """Get the path to the latest checkpoint if it exists"""
+    latest_file = os.path.join(checkpoint_dir, "checkpoint_last")
+    if os.path.exists(latest_file + '.model') and os.path.exists(latest_file + '.meta'):
+        return latest_file
+    return None
+
 def train_model(model: QuantumLLM,
                dataset: List[dict],
                args: argparse.Namespace):
@@ -173,11 +241,19 @@ def train_model(model: QuantumLLM,
         weight_decay=0.01
     )
     
+    # Load checkpoint if specified
+    start_epoch = 0
+    if args.checkpoint:
+        model, checkpoint = load_checkpoint(model, args.checkpoint, device)
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Resuming from epoch {start_epoch}")
+    
     total_batches = len(dataset)
     print(f"\nStarting quantum training...")
     print(f"Total batches: {total_batches}")
     
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         model.train()  # Ensure model is in training mode
         
@@ -272,6 +348,16 @@ def train_model(model: QuantumLLM,
         print(f"Average Loss: {avg_loss:.4f}")
         print(f"Valid Batches: {valid_batches}/{total_batches}")
         print(f"Time: {epoch_time:.2f}s")
+        
+        # Save checkpoint at the end of each epoch
+        save_checkpoint(
+            model, 
+            optimizer, 
+            epoch, 
+            avg_loss, 
+            args,
+            path=args.checkpoint_dir
+        )
 
 def generate_text(
     model: QuantumLLM,
@@ -314,7 +400,7 @@ def main(args):
     # Initialize quantum model
     model = QuantumLLM(
         tokenizer=tokenizer,
-        dim=64  # Using smaller dimension for quantum model
+        dim=64
     )
     
     # Explicitly move model to device
@@ -334,6 +420,20 @@ def main(args):
     elif args.mode == 'generate':
         if not args.prompt:
             raise ValueError("Prompt is required for text generation")
+        
+        # Try to load specified checkpoint or fall back to latest
+        checkpoint_path = args.checkpoint
+        if not checkpoint_path:
+            checkpoint_path = get_latest_checkpoint(args.checkpoint_dir)
+            if checkpoint_path:
+                print(f"No checkpoint specified, using latest checkpoint: {checkpoint_path}")
+        
+        if checkpoint_path:
+            model, checkpoint = load_checkpoint(model, checkpoint_path, device)
+            if checkpoint is None:
+                print("Warning: Failed to load checkpoint. Using untrained model.")
+        else:
+            print("Warning: No checkpoint available. Using untrained model.")
         
         generated_text = generate_text(
             model,
@@ -356,6 +456,10 @@ if __name__ == "__main__":
                       help="Maximum number of samples to load from dataset")
     parser.add_argument('--epochs', type=int, default=3,
                       help="Number of training epochs")
+    parser.add_argument('--checkpoint', type=str,
+                      help="Path to checkpoint file for loading")
+    parser.add_argument('--checkpoint_dir', type=str, default="checkpoints",
+                      help="Directory to save checkpoints")
 
     args = parser.parse_args()
     main(args)
