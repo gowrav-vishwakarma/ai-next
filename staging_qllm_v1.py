@@ -1,917 +1,421 @@
-"""
-Quantum-Inspired Language Model Implementation
-Following the theoretical framework from Paper2
-
-Key Features Implemented:
-1. Multi-layer dynamic phase space representation
-2. Universal constants integration
-3. Quantum-inspired state processing
-4. Concept-based tokenization with multi-lingual support
-5. Advanced training mechanisms with unitary constraints
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-import numpy as np
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
-from collections import defaultdict
+from datasets import load_dataset
+from transformers import AutoTokenizer
+import argparse
+import os
+import gc
+from tqdm import tqdm
+import time
 
-# Device configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Determine the best available device
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+print(f"Using device: {device}")
 
-@dataclass
-class QuantumConstants:
-    """Universal constants for quantum operations"""
-    PHI: float = (1 + math.sqrt(5)) / 2  # Golden ratio
-    E: float = math.e  # Euler's number
-    PI: float = math.pi
-    
-    @staticmethod
-    def get_phase_factors(dim: int) -> torch.Tensor:
-        """Generate phase factors using golden ratio"""
-        phases = torch.linspace(0, 2 * math.pi, dim)
-        return torch.exp(1j * phases * QuantumConstants.PHI)
+# Update environment variables for MPS if applicable
+if device == "mps":
+    os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.8'  # Allow using more memory
+    os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO'] = '0.5'   # Free memory more aggressively
 
-class ConceptTokenizer:
-    """
-    Advanced tokenizer with concept-based representation and multi-lingual support
-    """
-    def __init__(self, languages: List[str], concept_vocab_size: int = 10000):
-        self.languages = languages
-        self.concept_vocab_size = concept_vocab_size
-        self.word_to_concept: Dict[str, Dict[str, int]] = defaultdict(dict)
-        self.concept_to_words: Dict[int, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
-        self.word_vocabs: Dict[str, Dict[str, int]] = {lang: {} for lang in languages}
-        
-    def add_concept_mapping(self, concept_id: int, words: Dict[str, List[str]]):
-        """Add word-concept mappings for multiple languages"""
-        for lang, word_list in words.items():
-            for word in word_list:
-                self.word_to_concept[lang][word] = concept_id
-                self.concept_to_words[concept_id][lang].append(word)
-                if word not in self.word_vocabs[lang]:
-                    self.word_vocabs[lang][word] = len(self.word_vocabs[lang])
-    
-    def encode_to_concepts(self, text: str, language: str) -> torch.Tensor:
-        """Convert text to concept IDs"""
-        words = text.lower().split()
-        concepts = []
-        for word in words:
-            concept_id = self.word_to_concept[language].get(word, 0)  # 0 for unknown
-            concepts.append(concept_id)
-        return torch.tensor(concepts, dtype=torch.long)
-    
-    def decode_from_concepts(self, concept_ids: torch.Tensor, target_language: str) -> str:
-        """Convert concept IDs back to text in target language"""
-        words = []
-        for concept_id in concept_ids.tolist():
-            word_list = self.concept_to_words[concept_id][target_language]
-            words.append(word_list[0] if word_list else "<UNK>")
-        return " ".join(words)
+def clear_memory():
+    """Clear memory caches"""
+    gc.collect()
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    elif device == "mps":
+        torch.mps.empty_cache()
 
-class DynamicQuantumLayer(nn.Module):
+class SimpleQuantumState(nn.Module):
     """
-    Base quantum layer with dynamic dimensionality
+    Simplified quantum state representation with just two layers:
+    1. Ground state (basic meaning)
+    2. Single excited state (contextual meaning)
     """
-    def __init__(self, base_dim: int, layer_type: str):
+    def __init__(self, dim: int):
         super().__init__()
-        self.base_dim = base_dim
-        self.layer_type = layer_type
-        self.dim_scaler = nn.Linear(base_dim, 1)
+        self.dim = dim
         
-        # Initialize quantum bases
-        self.register_buffer('phase_basis', QuantumConstants.get_phase_factors(base_dim))
+        # Add layer norms
+        self.input_norm = nn.LayerNorm(dim)
+        self.output_norm = nn.LayerNorm(dim)
         
-    def adjust_dimension(self, x: torch.Tensor) -> int:
-        """Dynamically adjust dimension based on input complexity"""
-        complexity_score = torch.sigmoid(self.dim_scaler(x.mean(dim=1)))
-        return int(self.base_dim * (0.5 + complexity_score.item()))
-    
-    def quantum_transform(self, x: torch.Tensor, dim: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply quantum transformation with adjusted dimension using real arithmetic"""
-        # Use cached phase factors or compute new ones
-        if not hasattr(self, '_cached_phases') or self._cached_dim != dim:
-            phases = torch.linspace(0, 2 * math.pi, dim, device=x.device)
-            self._cached_cos = torch.cos(phases)
-            self._cached_sin = torch.sin(phases)
-            self._cached_dim = dim
-            
-        # Efficient real-valued computation
-        real_part = x * self._cached_cos.to(x.device)
-        imag_part = x * self._cached_sin.to(x.device)
+        # Even smaller initialization
+        self.ground_transform = nn.Linear(dim, dim)
+        nn.init.xavier_normal_(self.ground_transform.weight, gain=0.01)
+        nn.init.zeros_(self.ground_transform.bias)
         
-        return real_part, imag_part
+        self.excite_transform = nn.Linear(dim, dim)
+        nn.init.xavier_normal_(self.excite_transform.weight, gain=0.01)
+        nn.init.zeros_(self.excite_transform.bias)
+        
+        # Much smaller phase factor initialization
+        self.phase_factor = nn.Parameter(torch.randn(dim) * 0.001)
+        
+        self.PHI = (1 + math.sqrt(5)) / 2
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if len(x.shape) == 2:
+            x = x.unsqueeze(0)
+        
+        # Input normalization
+        x = self.input_norm(x)
+        x = x * 0.01  # Aggressive scaling
+        
+        # Process ground state with residual connection
+        ground_state = self.ground_transform(x) + x
+        
+        # Very bounded phase
+        phase = torch.tanh(self.phase_factor) * self.PHI * 0.01
+        excited_state = self.excite_transform(x) + x
+        
+        # Combine states with scaling
+        combined_real = ground_state + excited_state * torch.cos(phase)
+        combined_imag = excited_state * torch.sin(phase)
+        
+        # Normalize with larger epsilon
+        norm = torch.sqrt(combined_real.pow(2) + combined_imag.pow(2) + 1e-8)
+        combined_real = combined_real / norm
+        combined_imag = combined_imag / norm
+        
+        # Output normalization
+        combined_real = self.output_norm(combined_real)
+        combined_imag = self.output_norm(combined_imag)
+        
+        return combined_real, combined_imag
 
-class MultiLayerQuantumEncoder(nn.Module):
+class BasicQuantumAttention(nn.Module):
     """
-    Implements multi-layer quantum encoding with semantic, context, and emotion layers
-    """
-    def __init__(self, concept_size: int, base_dim: int):
-        super().__init__()
-        self.concept_size = concept_size
-        self.base_dim = base_dim
-        
-        # Initialize layers
-        self.semantic_layer = DynamicQuantumLayer(base_dim, 'semantic')
-        self.context_layer = DynamicQuantumLayer(base_dim, 'context')
-        self.emotion_layer = DynamicQuantumLayer(base_dim, 'emotion')
-        
-        # Concept embeddings
-        self.concept_embedding = nn.Embedding(concept_size, base_dim)
-        
-        # Layer-specific transformations
-        self.semantic_transform = nn.Linear(base_dim, base_dim)
-        self.context_transform = nn.Linear(base_dim, base_dim)
-        self.emotion_transform = nn.Linear(base_dim, base_dim)
-        
-    def forward(self, concept_ids: torch.Tensor) -> Tuple[torch.Tensor, Dict]:
-        # Get base embeddings
-        base_embeddings = self.concept_embedding(concept_ids)
-        
-        # Process through layers with dynamic dimensions
-        semantic_dim = self.semantic_layer.adjust_dimension(base_embeddings)
-        context_dim = self.context_layer.adjust_dimension(base_embeddings)
-        emotion_dim = self.emotion_layer.adjust_dimension(base_embeddings)
-        
-        # Transform and apply quantum operations
-        semantic_state = self.semantic_layer.quantum_transform(
-            self.semantic_transform(base_embeddings),
-            semantic_dim
-        )
-        context_state = self.context_layer.quantum_transform(
-            self.context_transform(base_embeddings),
-            context_dim
-        )
-        emotion_state = self.emotion_layer.quantum_transform(
-            self.emotion_transform(base_embeddings),
-            emotion_dim
-        )
-        
-        # Combine states through interference
-        combined_state = self.interference_combine([
-            semantic_state, context_state, emotion_state
-        ])
-        
-        layer_info = {
-            'semantic_dim': semantic_dim,
-            'context_dim': context_dim,
-            'emotion_dim': emotion_dim
-        }
-        
-        return combined_state, layer_info
-    
-    def interference_combine(self, states: List[torch.Tensor]) -> torch.Tensor:
-        """Combine quantum states through interference patterns"""
-        combined = torch.zeros_like(states[0])
-        for i, state1 in enumerate(states):
-            for j, state2 in enumerate(states):
-                if i != j:
-                    phase_diff = torch.angle(state1) - torch.angle(state2)
-                    interference = torch.cos(phase_diff)
-                    combined += state1 * interference
-        return combined / len(states)
-
-class GlobalQuantumAttention(nn.Module):
-    """
-    Implements quantum attention with global interference and entanglement effects
-    Optimized for GPU execution with real arithmetic
+    Memory-efficient quantum attention using phase relationships
     """
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
         self.scale = dim ** -0.5
         
-    @staticmethod
-    def fast_phase_diff(real_a: torch.Tensor, imag_a: torch.Tensor, 
-                       real_b: torch.Tensor, imag_b: torch.Tensor) -> torch.Tensor:
-        """Compute phase differences using fast approximation"""
-        # Compute dot product for cosine similarity
-        dot_product = (real_a * real_b + imag_a * imag_b)
-        # Compute cross product for sine
-        cross_product = (imag_a * real_b - real_a * imag_b)
+        # Add more layer norms
+        self.q_norm = nn.LayerNorm(dim)
+        self.k_norm = nn.LayerNorm(dim)
+        self.v_norm = nn.LayerNorm(dim)
+        self.output_norm = nn.LayerNorm(dim)
         
-        # Fast arctangent approximation
-        phase_diff = cross_product / (torch.abs(dot_product) + 1e-6)
-        phase_diff = phase_diff * (1.0 - 0.28125 * phase_diff * phase_diff)
+    def forward(self, q_real, q_imag, k_real, k_imag, v_real, v_imag):
+        # Apply layer norm and scaling
+        q_real = self.q_norm(q_real) * 0.01
+        q_imag = self.q_norm(q_imag) * 0.01
+        k_real = self.k_norm(k_real) * 0.01
+        k_imag = self.k_norm(k_imag) * 0.01
+        v_real = self.v_norm(v_real) * 0.01
+        v_imag = self.v_norm(v_imag) * 0.01
         
-        return phase_diff
+        # Get dimensions
+        B, L, D = q_real.shape
         
-    def compute_global_interference(self, states_real: torch.Tensor, 
-                                  states_imag: torch.Tensor) -> torch.Tensor:
-        """Compute global interference pattern using real arithmetic"""
-        batch_size, seq_len = states_real.shape[:2]
+        # Process in smaller chunks
+        chunk_size = min(L, 32)  # Smaller chunks
+        output_real = torch.zeros(B, L, D, device=q_real.device)
+        output_imag = torch.zeros(B, L, D, device=q_imag.device)
         
-        # Compute all-to-all phase differences efficiently
-        real_expanded = states_real.unsqueeze(2)  # [B, L, 1, D]
-        imag_expanded = states_imag.unsqueeze(2)  # [B, L, 1, D]
-        real_transposed = states_real.unsqueeze(1)  # [B, 1, L, D]
-        imag_transposed = states_imag.unsqueeze(1)  # [B, 1, L, D]
+        for i in range(0, L, chunk_size):
+            j = min(i + chunk_size, L)
+            
+            # Get current chunk
+            q_real_chunk = q_real[:, i:j]
+            q_imag_chunk = q_imag[:, i:j]
+            
+            # Compute attention scores with residual connection
+            real_diff = (q_real_chunk.unsqueeze(2) - k_real.unsqueeze(1)) * self.scale
+            imag_diff = (q_imag_chunk.unsqueeze(2) - k_imag.unsqueeze(1)) * self.scale
+            
+            # Sum with stability term
+            real_sum = torch.sum(real_diff, dim=-1) + 1e-8
+            imag_sum = torch.sum(imag_diff, dim=-1) + 1e-8
+            
+            # Compute stable phase difference
+            phase_diff = torch.atan2(imag_sum, real_sum)
+            
+            # Compute stable attention weights
+            attn_weights = torch.softmax(torch.cos(phase_diff) * 10.0, dim=-1)
+            
+            # Apply attention with scaled values
+            output_real[:, i:j] = torch.bmm(attn_weights, v_real) * 0.1
+            output_imag[:, i:j] = torch.bmm(attn_weights, v_imag) * 0.1
+            
+            # Clear memory
+            del real_diff, imag_diff, phase_diff, attn_weights
+            if device == "mps":
+                torch.mps.empty_cache()
         
-        # Compute phase differences using fast approximation
-        phase_diffs = self.fast_phase_diff(
-            real_expanded, imag_expanded,
-            real_transposed, imag_transposed
-        )
+        # Final normalization
+        output_real = self.output_norm(output_real)
+        output_imag = self.output_norm(output_imag)
         
-        # Compute interference using pre-computed cosine
-        interference = torch.cos(phase_diffs)
-        
-        return interference / seq_len
-    
-    def simulate_entanglement(self, states: torch.Tensor, global_phase: torch.Tensor) -> torch.Tensor:
-        """Simulate quantum entanglement effects"""
-        entangled_states = states * torch.exp(1j * global_phase)
-        return entangled_states
-    
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        # Compute global interference
-        global_interference = self.compute_global_interference(q)
-        
-        # Compute phase-based attention
-        phase_diff = torch.angle(q.unsqueeze(2) - k.unsqueeze(1))
-        attn_pattern = torch.softmax(phase_diff * self.scale, dim=-1)
-        
-        # Apply global interference
-        attn_pattern = attn_pattern * global_interference
-        
-        # Compute global phase for entanglement
-        global_phase = torch.mean(torch.angle(q), dim=1, keepdim=True)
-        
-        # Apply attention and entanglement
-        output = torch.matmul(attn_pattern, v)
-        output = self.simulate_entanglement(output, global_phase)
-        
-        return output
+        return output_real, output_imag
 
-class QuantumLLM(nn.Module):
+class SimpleQuantumLLM(nn.Module):
     """
-    Main quantum language model implementing all features from Paper2
+    Minimal quantum-inspired language model
     """
-    def __init__(self, config: dict):
+    def __init__(self, vocab_size: int, dim: int):
         super().__init__()
-        self.config = config
+        self.vocab_size = vocab_size
+        self.dim = dim
         
-        # Initialize tokenizer
-        self.tokenizer = ConceptTokenizer(
-            languages=config['languages'],
-            concept_vocab_size=config['concept_vocab_size']
+        # Initialize embeddings with smaller values
+        self.embedding = nn.Embedding(vocab_size, dim)
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=0.02)
+        
+        self.quantum_state = SimpleQuantumState(dim)
+        self.attention = BasicQuantumAttention(dim)
+        
+        # Add layer norm before output
+        self.pre_output_norm = nn.LayerNorm(dim * 2)
+        self.output = nn.Linear(dim * 2, vocab_size)
+        nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.output.bias)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Get embeddings [batch_size, seq_len, dim]
+        embed = self.embedding(x)
+        
+        # Process through quantum state
+        state_real, state_imag = self.quantum_state(embed)
+        
+        # Ensure states have correct shape [batch_size, seq_len, dim]
+        B, L, D = embed.shape
+        state_real = state_real.view(B, L, D)
+        state_imag = state_imag.view(B, L, D)
+        
+        # Apply attention
+        attn_real, attn_imag = self.attention(
+            state_real, state_imag,
+            state_real, state_imag,
+            state_real, state_imag
         )
         
-        # Initialize encoder
-        self.encoder = MultiLayerQuantumEncoder(
-            concept_size=config['concept_vocab_size'],
-            base_dim=config['base_dim']
+        # Combine real and imaginary parts [batch_size, seq_len, dim*2]
+        combined = torch.cat([attn_real, attn_imag], dim=-1)
+        
+        # Project to vocabulary [batch_size, seq_len, vocab_size]
+        return self.output(combined)
+    
+    def compute_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # More aggressive clipping
+        logits = torch.clamp(logits, -10, 10)
+        
+        # Use label smoothing and ignore padding
+        ce_loss = F.cross_entropy(
+            logits.view(-1, self.vocab_size),
+            targets.view(-1),
+            label_smoothing=0.1,
+            ignore_index=0  # Assuming 0 is padding
         )
         
-        # Initialize attention layers
-        self.attention_layers = nn.ModuleList([
-            GlobalQuantumAttention(config['base_dim'])
-            for _ in range(config['num_layers'])
-        ])
-        
-        # Language-specific output projections
-        self.language_projections = nn.ModuleDict({
-            lang: nn.Linear(config['base_dim'], len(self.tokenizer.word_vocabs[lang]))
-            for lang in config['languages']
-        })
-        
-    def compute_unitary_loss(self, states: torch.Tensor) -> torch.Tensor:
-        """Compute unitary constraint loss"""
-        # Check if state transformation preserves norm
-        initial_norm = torch.norm(states, dim=-1)
-        transformed = self.encoder.quantum_transform(states, states.size(-1))
-        transformed_norm = torch.norm(transformed, dim=-1)
-        return F.mse_loss(transformed_norm, initial_norm)
-    
-    def compute_coherence_loss(self, states: torch.Tensor) -> torch.Tensor:
-        """Compute phase coherence loss"""
-        phases = torch.angle(states)
-        coherence = torch.abs(torch.mean(torch.exp(1j * phases), dim=-1))
-        return -torch.mean(coherence)  # Negative as we want to maximize coherence
-    
-    def compute_energy_loss(self, states: torch.Tensor) -> torch.Tensor:
-        """Compute energy-based loss"""
-        phases = torch.angle(states)
-        phase_diffs = phases.unsqueeze(-1) - phases.unsqueeze(-2)
-        energy = -torch.mean(torch.cos(phase_diffs))
-        return energy
-    
-    @torch.cuda.amp.autocast()
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        target_ids: Optional[torch.Tensor] = None,
-        language: str = 'en'
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Forward pass optimized for GPU execution using real arithmetic
-        Uses mixed precision and efficient memory handling
-        """
-        # Move inputs to GPU with non-blocking transfer
-        input_ids = input_ids.to(self.device, non_blocking=True)
-        if target_ids is not None:
-            target_ids = target_ids.to(self.device, non_blocking=True)
+        # Remove phase coherence loss initially
+        return ce_loss
 
-        # Process through encoder with real arithmetic
-        states_real, states_imag = self.encoder(input_ids)
-        
-        # Process through attention layers
-        # Using accumulator to avoid creating new tensors
-        accum_real = states_real
-        accum_imag = states_imag
-        
-        for layer in self.attention_layers:
-            # Process attention in chunks for memory efficiency
-            chunk_size = 1024
-            num_chunks = (states_real.size(1) + chunk_size - 1) // chunk_size
-            
-            chunk_outputs_real = []
-            chunk_outputs_imag = []
-            
-            for i in range(num_chunks):
-                start_idx = i * chunk_size
-                end_idx = min((i + 1) * chunk_size, states_real.size(1))
-                
-                # Process chunk
-                chunk_real = states_real[:, start_idx:end_idx]
-                chunk_imag = states_imag[:, start_idx:end_idx]
-                
-                # Compute attention for chunk
-                attn_real, attn_imag = layer(
-                    chunk_real, chunk_imag,
-                    states_real, states_imag  # Full context
-                )
-                
-                chunk_outputs_real.append(attn_real)
-                chunk_outputs_imag.append(attn_imag)
-                
-                # Clear GPU cache periodically
-                if i % 4 == 0:
-                    torch.cuda.empty_cache()
-            
-            # Combine chunks
-            attention_real = torch.cat(chunk_outputs_real, dim=1)
-            attention_imag = torch.cat(chunk_outputs_imag, dim=1)
-            
-            # Update accumulators in-place
-            accum_real.add_(attention_real)
-            accum_imag.add_(attention_imag)
-            
-            # Normalize to maintain stability
-            norm = torch.sqrt(accum_real.pow(2) + accum_imag.pow(2) + 1e-6)
-            accum_real.div_(norm)
-            accum_imag.div_(norm)
-        
-        # Final projection to vocabulary space
-        # Combine real and imaginary parts for projection
-        combined_features = torch.cat([accum_real, accum_imag], dim=-1)
-        logits = self.language_projections[language](combined_features)
-        
-        if target_ids is not None:
-            # Compute losses with real arithmetic
-            main_loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                target_ids.view(-1),
-                ignore_index=-1
-            )
-            
-            # Compute quantum-inspired losses using real arithmetic
-            unitary_loss = self.compute_unitary_loss_real(
-                accum_real, accum_imag,
-                states_real, states_imag
-            )
-            
-            coherence_loss = self.compute_coherence_loss_real(
-                accum_real, accum_imag
-            )
-            
-            energy_loss = self.compute_energy_loss_real(
-                accum_real, accum_imag
-            )
-            
-            # Combine losses
-            total_loss = (
-                main_loss +
-                self.config['unitary_weight'] * unitary_loss +
-                self.config['coherence_weight'] * coherence_loss +
-                self.config['energy_weight'] * energy_loss
-            )
-            
-            return logits, total_loss
-        
-        return logits, None
-
-    def compute_unitary_loss_real(
-        self,
-        final_real: torch.Tensor,
-        final_imag: torch.Tensor,
-        initial_real: torch.Tensor,
-        initial_imag: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute unitary constraint loss using real arithmetic"""
-        # Compute norms
-        initial_norm = torch.sqrt(initial_real.pow(2) + initial_imag.pow(2) + 1e-6)
-        final_norm = torch.sqrt(final_real.pow(2) + final_imag.pow(2) + 1e-6)
-        
-        # Compare norms
-        return F.mse_loss(final_norm, initial_norm)
+def train_step(
+    model: SimpleQuantumLLM,
+    optimizer: torch.optim.Optimizer,
+    input_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    accumulation_steps: int = 4
+) -> float:
+    optimizer.zero_grad()
     
-    def compute_coherence_loss_real(
-        self,
-        real: torch.Tensor,
-        imag: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute phase coherence loss using real arithmetic"""
-        # Compute phase using fast approximation
-        phase = torch.atan2(imag + 1e-6, real + 1e-6)
-        
-        # Compute coherence using real and imaginary parts
-        cos_sum = torch.mean(torch.cos(phase), dim=-1)
-        sin_sum = torch.mean(torch.sin(phase), dim=-1)
-        
-        coherence = torch.sqrt(cos_sum.pow(2) + sin_sum.pow(2) + 1e-6)
-        return -torch.mean(coherence)  # Negative as we want to maximize coherence
+    # Even more aggressive gradient clipping
+    for param in model.parameters():
+        if param.requires_grad:
+            param.register_hook(lambda grad: torch.clamp(grad, -0.1, 0.1))
     
-    def compute_energy_loss_real(
-        self,
-        real: torch.Tensor,
-        imag: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute energy-based loss using real arithmetic"""
-        # Compute phase differences efficiently
-        phase = torch.atan2(imag + 1e-6, real + 1e-6)
-        phase_diffs = phase.unsqueeze(-1) - phase.unsqueeze(-2)
+    try:
+        logits = model(input_ids)
+        loss = model.compute_loss(logits, target_ids) / accumulation_steps
         
-        # Compute energy using cosine of phase differences
-        energy = -torch.mean(torch.cos(phase_diffs))
-        # Encode inputs into quantum states
-        states, layer_info = self.encoder(input_ids)
+        if not torch.isfinite(loss):
+            print("Warning: Non-finite loss, skipping batch")
+            return float('nan')
         
-        # Process through attention layers
-        for layer in self.attention_layers:
-            states = states + layer(states, states, states)
+        # Skip if loss is too high
+        if loss.item() > 100:
+            print("Warning: Loss too high, skipping batch")
+            return float('nan')
         
-        # Project to vocabulary space
-        logits = self.language_projections[language](states.real)
-        
-        if target_ids is not None:
-            # Compute main loss
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                target_ids.view(-1),
-                ignore_index=-1
-            )
-            
-            # Add quantum-inspired losses
-            unitary_loss = self.compute_unitary_loss(states)
-            coherence_loss = self.compute_coherence_loss(states)
-            energy_loss = self.compute_energy_loss(states)
-            
-            # Combine losses
-            total_loss = (
-                loss +
-                self.config['unitary_weight'] * unitary_loss +
-                self.config['coherence_weight'] * coherence_loss +
-                self.config['energy_weight'] * energy_loss
-            )
-            
-            return logits, total_loss
-        
-        return logits, None
-
-    def generate(
-        self,
-        prompt: str,
-        language: str,
-        max_length: int = 100,
-        temperature: float = 0.7
-    ) -> str:
-        """Generate text in specified language"""
-        self.eval()
-        with torch.no_grad():
-            # Encode prompt to concepts
-            concept_ids = self.tokenizer.encode_to_concepts(prompt, language)
-            concept_ids = concept_ids.unsqueeze(0).to(device)
-            
-            generated_concepts = []
-            
-            for _ in range(max_length):
-                # Get model predictions
-                logits, _ = self(concept_ids, language=language)
-                next_token_logits = logits[0, -1, :] / temperature
-                
-                # Sample next token
-                next_token = torch.multinomial(
-                    F.softmax(next_token_logits, dim=-1),
-                    num_samples=1
-                ).item()
-                
-                generated_concepts.append(next_token)
-                
-                if next_token == self.tokenizer.concept_to_words[0][language][0]:  # End token
-                    break
-                
-                concept_ids = torch.cat([
-                    concept_ids,
-                    torch.tensor([[next_token]], device=device)
-                ], dim=1)
-            
-            # Decode concepts to text
-            return self.tokenizer.decode_from_concepts(
-                torch.tensor(generated_concepts),
-                language
-            )
-
-# Example configuration
-def get_default_config():
-    return {
-        'languages': ['en', 'es', 'fr'],
-        'concept_vocab_size': 10000,
-        'base_dim': 256,
-        'num_layers': 6,
-        'unitary_weight': 0.1,
-        'coherence_weight': 0.1,
-        'energy_weight': 0.1,
-    }
-
-# Training utilities
-class QuantumTrainer:
-    """
-    Trainer class implementing quantum-inspired optimization techniques
-    """
-    def __init__(
-        self,
-        model: QuantumLLM,
-        config: dict,
-        languages: List[str],
-        device: torch.device
-    ):
-        self.model = model
-        self.config = config
-        self.languages = languages
-        self.device = device
-        
-        # Initialize optimizer with quantum-aware parameter groups
-        self.optimizer = torch.optim.AdamW([
-            {'params': model.encoder.parameters(), 'lr': config['encoder_lr']},
-            {'params': model.attention_layers.parameters(), 'lr': config['attention_lr']},
-            {'params': model.language_projections.parameters(), 'lr': config['projection_lr']}
-        ])
-        
-        # Initialize quantum-aware learning rate scheduler
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=config['scheduler_t0'],
-            T_mult=config['scheduler_t_mult']
-        )
-        
-    def quantum_backward(self, loss: torch.Tensor):
-        """
-        Custom backward pass with quantum-aware gradient handling
-        """
-        # Scale gradients based on quantum state coherence
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.01)
+        optimizer.step()
+        return loss.item() * accumulation_steps
         
-        # Clip gradients using quantum-aware norm
-        torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(),
-            self.config['max_grad_norm']
-        )
-        
-        # Apply phase-based gradient scaling
-        for param in self.model.parameters():
-            if param.grad is not None and param.grad.is_complex():
-                phase = torch.angle(param.grad)
-                scale = torch.cos(phase) + 1  # Scale based on phase alignment
-                param.grad = param.grad.abs() * scale
-    
-    def train_step(
-        self,
-        batch: Dict[str, torch.Tensor],
-        language: str
-    ) -> Dict[str, float]:
-        """
-        Single training step with quantum-aware optimization
-        """
-        self.model.train()
-        self.optimizer.zero_grad()
-        
-        # Move batch to device
-        input_ids = batch['input_ids'].to(self.device)
-        target_ids = batch['target_ids'].to(self.device)
-        
-        # Forward pass
-        logits, total_loss = self.model(
-            input_ids=input_ids,
-            target_ids=target_ids,
-            language=language
-        )
-        
-        # Quantum-aware backward pass
-        self.quantum_backward(total_loss)
-        
-        # Update with quantum-aware optimization
-        self.optimizer.step()
-        self.scheduler.step()
-        
-        return {
-            'loss': total_loss.item(),
-            'perplexity': torch.exp(total_loss).item()
-        }
-    
-    def train_epoch(
-        self,
-        dataloader: torch.utils.data.DataLoader,
-        language: str
-    ) -> Dict[str, float]:
-        """
-        Train for one epoch
-        """
-        epoch_loss = 0
-        epoch_perplexity = 0
-        steps = 0
-        
-        for batch in dataloader:
-            step_metrics = self.train_step(batch, language)
-            epoch_loss += step_metrics['loss']
-            epoch_perplexity += step_metrics['perplexity']
-            steps += 1
-            
-            # Clear GPU memory
-            torch.cuda.empty_cache()
-        
-        return {
-            'avg_loss': epoch_loss / steps,
-            'avg_perplexity': epoch_perplexity / steps
-        }
-    
-    def evaluate(
-        self,
-        dataloader: torch.utils.data.DataLoader,
-        language: str
-    ) -> Dict[str, float]:
-        """
-        Evaluate model on validation/test data
-        """
-        self.model.eval()
-        total_loss = 0
-        total_perplexity = 0
-        steps = 0
-        
-        with torch.no_grad():
-            for batch in dataloader:
-                input_ids = batch['input_ids'].to(self.device)
-                target_ids = batch['target_ids'].to(self.device)
-                
-                logits, loss = self.model(
-                    input_ids=input_ids,
-                    target_ids=target_ids,
-                    language=language
-                )
-                
-                total_loss += loss.item()
-                total_perplexity += torch.exp(loss).item()
-                steps += 1
-        
-        return {
-            'eval_loss': total_loss / steps,
-            'eval_perplexity': total_perplexity / steps
-        }
+    except RuntimeError as e:
+        print(f"Runtime error: {e}")
+        return float('nan')
 
-class QuantumDataset(torch.utils.data.Dataset):
+def generate(
+    model: SimpleQuantumLLM,
+    prompt: torch.Tensor,
+    max_length: int = 100,
+    temperature: float = 0.7
+) -> torch.Tensor:
     """
-    Dataset class for quantum model with multi-lingual support
+    Simple generation function
     """
-    def __init__(
-        self,
-        texts: List[str],
-        tokenizer: ConceptTokenizer,
-        language: str,
-        max_length: int = 512
-    ):
-        self.texts = texts
-        self.tokenizer = tokenizer
-        self.language = language
-        self.max_length = max_length
-    
-    def __len__(self):
-        return len(self.texts)
-    
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        text = self.texts[idx]
+    model.eval()
+    with torch.no_grad():
+        generated = prompt
         
-        # Convert to concept IDs
-        concept_ids = self.tokenizer.encode_to_concepts(
-            text,
-            self.language
+        for _ in range(max_length):
+            # Get predictions
+            logits = model(generated)
+            next_token_logits = logits[:, -1, :] / temperature
+            
+            # Sample
+            probs = F.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append and continue
+            generated = torch.cat([generated, next_token], dim=1)
+            
+            # Optional: Check for end token
+            if next_token.item() == 0:  # Assuming 0 is end token
+                break
+                
+        return generated
+
+def load_wikitext_dataset(max_samples=None):
+    """Load and preprocess the Wikitext dataset"""
+    dataset = load_dataset("wikitext", "wikitext-103-v1", split='train')
+    
+    if max_samples is not None:
+        dataset = dataset.take(max_samples)
+    
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    
+    def preprocess_function(examples):
+        # Tokenize with fixed sequence length
+        encodings = tokenizer(
+            examples['text'],
+            truncation=True,
+            padding='max_length',
+            max_length=512,  # Match model's dim
+            return_tensors='pt'
         )
         
-        # Truncate or pad sequence
-        if len(concept_ids) > self.max_length:
-            concept_ids = concept_ids[:self.max_length]
+        # Ensure batch dimension
+        if len(encodings['input_ids'].shape) == 1:
+            encodings['input_ids'] = encodings['input_ids'].unsqueeze(0)
         
-        # Prepare input and target
-        input_ids = concept_ids[:-1]
-        target_ids = concept_ids[1:]
-        
-        # Pad sequences
-        input_ids = F.pad(
-            input_ids,
-            (0, self.max_length - len(input_ids)),
-            value=0
+        return encodings
+    
+    # Show progress bar for dataset processing
+    print("Processing dataset...")
+    with tqdm(desc="Tokenizing", total=1) as pbar:
+        tokenized_dataset = dataset.map(
+            preprocess_function,
+            batched=True,
+            batch_size=1,
+            remove_columns=dataset.column_names,
+            desc="Tokenizing"  # Removed 'leave' parameter
         )
-        target_ids = F.pad(
-            target_ids,
-            (0, self.max_length - len(target_ids)),
-            value=-1
-        )
-        
-        return {
-            'input_ids': input_ids,
-            'target_ids': target_ids
-        }
+        pbar.update(1)
+    
+    return tokenized_dataset
 
-def save_quantum_checkpoint(
-    model: QuantumLLM,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    epoch: int,
-    metrics: Dict[str, float],
-    path: str
-):
-    """Save model checkpoint with quantum states"""
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'metrics': metrics,
-    }, path)
-
-def load_quantum_checkpoint(
-    model: QuantumLLM,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    path: str
-) -> Tuple[int, Dict[str, float]]:
-    """Load model checkpoint and restore quantum states"""
-    checkpoint = torch.load(path)
+def main(args):
+    # Initialize model with compatible dimensions
+    config = {
+        'vocab_size': 30522,  # BERT vocab size
+        'dim': 512,          # Changed from 768 to match sequence length
+        'num_heads': 8,
+        'max_seq_length': 512
+    }
+    model = SimpleQuantumLLM(vocab_size=config['vocab_size'], dim=config['dim']).to(device)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    
-    return checkpoint['epoch'], checkpoint['metrics']
-
-# Example usage
-class GPUMemoryManager:
-    """Utility class for managing GPU memory efficiently"""
-    
-    def __init__(self, device: torch.device):
-        self.device = device
-        self.reserved_memory = {}
-    
-    @contextmanager
-    def track_memory(self, tag: str):
-        """Track memory usage for a specific operation"""
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            start_mem = torch.cuda.memory_allocated()
-            yield
-            torch.cuda.synchronize()
-            end_mem = torch.cuda.memory_allocated()
-            print(f"{tag} memory usage: {(end_mem - start_mem) / 1024**2:.2f}MB")
-        else:
-            yield
-    
-    @contextmanager
-    def efficient_memory_use(self):
-        """Context manager for efficient memory usage"""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            try:
-                yield
-            finally:
-                torch.cuda.empty_cache()
-        else:
-            yield
-    
-    def optimize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Optimize tensor for GPU memory usage"""
-        if tensor.dtype == torch.float64:
-            tensor = tensor.float()
-        return tensor.contiguous()
-    
-    def batch_to_gpu(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Efficiently move batch to GPU"""
-        return {
-            k: v.to(self.device, non_blocking=True) 
-            if isinstance(v, torch.Tensor) else v 
-            for k, v in batch.items()
-        }
-
-class QuantumMemoryOptimizer:
-    """Optimizer for quantum operations memory usage"""
-    
-    def __init__(self, chunk_size: int = 1024):
-        self.chunk_size = chunk_size
-    
-    def process_in_chunks(
-        self,
-        input_real: torch.Tensor,
-        input_imag: torch.Tensor,
-        process_fn: Callable
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Process large tensors in chunks"""
-        outputs_real = []
-        outputs_imag = []
-        
-        for i in range(0, input_real.size(1), self.chunk_size):
-            end_idx = min(i + self.chunk_size, input_real.size(1))
-            
-            # Process chunk
-            chunk_real = input_real[:, i:end_idx]
-            chunk_imag = input_imag[:, i:end_idx]
-            
-            out_real, out_imag = process_fn(chunk_real, chunk_imag)
-            
-            outputs_real.append(out_real)
-            outputs_imag.append(out_imag)
-            
-            # Clear cache periodically
-            if i % (4 * self.chunk_size) == 0:
-                torch.cuda.empty_cache()
-        
-        return (
-            torch.cat(outputs_real, dim=1),
-            torch.cat(outputs_imag, dim=1)
-        )
-
-def train_quantum_model():
-    # Initialize configuration with GPU optimizations
-    config = get_default_config()
-    config.update({
-        'use_amp': True,  # Automatic Mixed Precision
-        'gradient_accumulation_steps': 4,
-        'chunk_size': 1024,
-        'encoder_lr': 1e-4,
-        'attention_lr': 1e-4,
-        'projection_lr': 1e-4,
-        'scheduler_t0': 10,
-        'scheduler_t_mult': 2,
-        'max_grad_norm': 1.0,
-        'max_length': 512,
-        'batch_size': 16,
-        'num_epochs': 10,
-    })
-    
-    # Initialize model and trainer
-    model = QuantumLLM(config).to(device)
-    trainer = QuantumTrainer(
-        model=model,
-        config=config,
-        languages=config['languages'],
-        device=device
+    # Use AdamW with better defaults for stability
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=1e-5,  # Lower learning rate
+        betas=(0.9, 0.98),
+        eps=1e-8,
+        weight_decay=0.01
     )
-    
-    # Training loop example for English
-    language = 'en'
-    
-    # Create dataset (example)
-    train_texts = ["Sample text 1", "Sample text 2"]  # Replace with real data
-    train_dataset = QuantumDataset(
-        texts=train_texts,
-        tokenizer=model.tokenizer,
-        language=language,
-        max_length=config['max_length']
-    )
-    
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=config['batch_size'],
-        shuffle=True
-    )
-    
-    # Training loop
-    for epoch in range(config['num_epochs']):
-        print(f"Epoch {epoch + 1}/{config['num_epochs']}")
+
+    if args.mode == 'train':
+        print("Loading dataset...")
+        dataset = load_wikitext_dataset(max_samples=args.max_samples)
         
-        # Train epoch
-        train_metrics = trainer.train_epoch(train_dataloader, language)
-        print(f"Training metrics: {train_metrics}")
+        # Convert dataset to list for length calculation
+        dataset = list(dataset)
+        total_batches = len(dataset)
         
-        # Save checkpoint
-        save_quantum_checkpoint(
-            model=model,
-            optimizer=trainer.optimizer,
-            scheduler=trainer.scheduler,
-            epoch=epoch,
-            metrics=train_metrics,
-            path=f"quantum_checkpoint_epoch_{epoch}.pt"
-        )
+        print(f"\nStarting training...")
+        print(f"Total batches: {total_batches}")
+        
+        # Training loop with progress bars
+        for epoch in range(3):
+            print(f"\nEpoch {epoch+1}/3")
+            
+            # Initialize statistics
+            epoch_loss = 0
+            valid_batches = 0
+            start_time = time.time()
+            
+            # Create progress bar for this epoch
+            progress_bar = tqdm(dataset, desc=f"Training", 
+                              leave=True, 
+                              total=total_batches)
+            
+            for batch in progress_bar:
+                # Process batch
+                input_ids = torch.tensor(batch['input_ids']).to(device)
+                if len(input_ids.shape) == 1:
+                    input_ids = input_ids.unsqueeze(0)
+                
+                target_ids = torch.tensor(batch['input_ids']).to(device)
+                if len(target_ids.shape) == 1:
+                    target_ids = target_ids.unsqueeze(0)
+                
+                # Train step
+                loss = train_step(model, optimizer, input_ids, target_ids, accumulation_steps=4)
+                
+                # Update statistics
+                if not math.isnan(loss):
+                    epoch_loss += loss
+                    valid_batches += 1
+                    
+                    # Update progress bar
+                    progress_bar.set_postfix({
+                        'loss': f"{loss:.4f}",
+                        'avg_loss': f"{epoch_loss/valid_batches:.4f}",
+                        'valid_batches': valid_batches
+                    })
+                
+                clear_memory()
+            
+            # Epoch statistics
+            epoch_time = time.time() - start_time
+            avg_loss = epoch_loss / valid_batches if valid_batches > 0 else float('nan')
+            
+            print(f"\nEpoch {epoch+1} Summary:")
+            print(f"Average Loss: {avg_loss:.4f}")
+            print(f"Valid Batches: {valid_batches}/{total_batches}")
+            print(f"Time: {epoch_time:.2f}s")
+
+    elif args.mode == 'generate':
+        # Generate text from a prompt
+        prompt = torch.tensor(args.prompt).to(device)
+        if len(prompt.shape) == 1:
+            prompt = prompt.unsqueeze(0)
+        generated_text = generate(model, prompt, max_length=args.max_length, temperature=args.temperature)
+        print("Generated text:", generated_text)
 
 if __name__ == "__main__":
-    train_quantum_model()
+    parser = argparse.ArgumentParser(description="Quantum-Inspired Language Model")
+    parser.add_argument('--mode', type=str, choices=['train', 'generate'], required=True, help="Mode: train or generate")
+    parser.add_argument('--prompt', type=str, help="Prompt for text generation")
+    parser.add_argument('--max_length', type=int, default=100, help="Maximum length of generated text")
+    parser.add_argument('--temperature', type=float, default=0.7, help="Temperature for text generation")
+    parser.add_argument('--max_samples', type=int, default=100, help="Maximum number of samples to load from the dataset")
+
+    args = parser.parse_args()
+    main(args)
