@@ -360,8 +360,8 @@ def main(args):
         print(f"Total batches: {total_batches}")
         
         # Training loop with progress bars
-        for epoch in range(3):
-            print(f"\nEpoch {epoch+1}/3")
+        for epoch in range(args.epochs):
+            print(f"\nEpoch {epoch+1}/{args.epochs}")
             
             # Initialize statistics
             epoch_loss = 0
@@ -427,6 +427,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_length', type=int, default=100, help="Maximum length of generated text")
     parser.add_argument('--temperature', type=float, default=0.7, help="Temperature for text generation")
     parser.add_argument('--max_samples', type=int, default=100, help="Maximum number of samples to load from the dataset")
+    parser.add_argument('--epochs', type=int, default=3, help="Number of training epochs")
 
     args = parser.parse_args()
     main(args)
