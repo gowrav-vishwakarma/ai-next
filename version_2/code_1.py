@@ -1,0 +1,361 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from datasets import load_dataset
+from typing import List, Tuple
+import math
+import gc
+from tqdm import tqdm
+import time
+import argparse
+from typing import List, Dict, Tuple, Optional
+
+from library.quantum_ml import BasicQuantumAttention, QuantumEmbedding, QuantumTokenizer, SimpleQuantumState, create_quantum_tokenizer
+
+# Get best available device
+def get_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        # Check if MPS is actually working
+        try:
+            tensor = torch.zeros(1).to("mps")
+            return "mps"
+        except:
+            print("Warning: MPS device found but not working properly. Using CPU instead.")
+            return "cpu"
+    return "cpu"
+
+device = get_device()
+
+def clear_memory():
+    """Clear memory caches safely"""
+    try:
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        elif device == "mps":
+            # Only try to clear MPS memory if it's available
+            try:
+                torch.mps.empty_cache()
+            except:
+                pass
+    except Exception as e:
+        print(f"Warning: Memory clearing failed: {e}")
+
+class QuantumLLM(nn.Module):
+    """
+    Updated quantum language model using phase-based tokenization
+    """
+    def __init__(self, tokenizer: QuantumTokenizer, dim: int):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.dim = dim
+        
+        # Quantum embedding layer
+        self.embedding = QuantumEmbedding(tokenizer, dim)
+        
+        # Quantum state processing
+        self.quantum_state = SimpleQuantumState(dim)
+        self.attention = BasicQuantumAttention(dim)
+        
+        # Output projection
+        self.pre_output_norm = nn.LayerNorm(dim * 2)
+        self.output = nn.Linear(dim * 2, len(tokenizer))
+        nn.init.normal_(self.output.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.output.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Get quantum embeddings
+        real_embed, imag_embed = self.embedding(x)
+        
+        # Process through quantum state
+        state_real, state_imag = self.quantum_state(real_embed)
+        
+        # Apply attention
+        attn_real, attn_imag = self.attention(
+            state_real, state_imag,
+            state_real, state_imag,
+            state_real, state_imag
+        )
+        
+        # Combine real and imaginary parts
+        combined = torch.cat([attn_real, attn_imag], dim=-1)
+        combined = self.pre_output_norm(combined)
+        
+        # Project to vocabulary
+        return self.output(combined)
+    
+    def compute_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # Clip logits for stability
+        logits = torch.clamp(logits, -10, 10)
+        
+        # Cross entropy with label smoothing
+        ce_loss = F.cross_entropy(
+            logits.view(-1, len(self.tokenizer)),
+            targets.view(-1),
+            label_smoothing=0.1,
+            ignore_index=self.tokenizer.vocab[self.tokenizer.PAD_token]
+        )
+        
+        return ce_loss
+    
+    def to(self, device):
+        """Override to method to ensure all components move to device"""
+        super().to(device)
+        self.embedding = self.embedding.to(device)
+        self.quantum_state = self.quantum_state.to(device)
+        self.attention = self.attention.to(device)
+        self.pre_output_norm = self.pre_output_norm.to(device)
+        self.output = self.output.to(device)
+        return self
+
+def load_quantum_wikitext(max_samples: Optional[int] = None):
+    """Load and preprocess Wikitext with quantum tokenizer"""
+    # Load raw dataset
+    dataset = load_dataset("wikitext", "wikitext-103-v1", split='train')
+    
+    if max_samples is not None:
+        dataset = dataset.take(max_samples)
+    
+    # Extract texts
+    texts = [example['text'] for example in dataset]
+    
+    # Create and train tokenizer
+    print("Creating quantum tokenizer...")
+    tokenizer = create_quantum_tokenizer(texts, dim=64)
+    
+    def preprocess_function(examples):
+        # Tokenize with quantum tokenizer
+        encodings = tokenizer.encode(examples['text'])
+        
+        # Ensure consistent length
+        if len(encodings) > 512:
+            encodings = encodings[:512]
+        else:
+            pad_length = 512 - len(encodings)
+            encodings = torch.cat([
+                encodings,
+                torch.full((pad_length,), tokenizer.vocab[tokenizer.PAD_token])
+            ])
+        
+        # Convert to tensor explicitly
+        return {'input_ids': torch.tensor(encodings, dtype=torch.long)}
+    
+    # Process dataset
+    print("Tokenizing dataset...")
+    tokenized_dataset = dataset.map(
+        preprocess_function,
+        remove_columns=dataset.column_names,
+        desc="Tokenizing"
+    )
+    
+    # Convert to torch format
+    tokenized_dataset.set_format(type='torch', columns=['input_ids'])
+    
+    return tokenized_dataset, tokenizer
+
+def train_model(model: QuantumLLM,
+               dataset: List[dict],
+               args: argparse.Namespace):
+    """Train the quantum language model"""
+    print(f"Training on device: {device}")
+    
+    # Ensure model is on correct device
+    model = model.to(device)
+    
+    # Initialize optimizer with quantum-friendly parameters
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=1e-5,
+        betas=(0.9, 0.98),
+        eps=1e-8,
+        weight_decay=0.01
+    )
+    
+    total_batches = len(dataset)
+    print(f"\nStarting quantum training...")
+    print(f"Total batches: {total_batches}")
+    
+    for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch+1}/{args.epochs}")
+        model.train()  # Ensure model is in training mode
+        
+        # Initialize statistics
+        epoch_loss = 0
+        valid_batches = 0
+        start_time = time.time()
+        
+        # Create progress bar
+        progress_bar = tqdm(dataset, desc=f"Training", 
+                          leave=True, 
+                          total=total_batches)
+        
+        for batch in progress_bar:
+            try:
+                # Process batch with error handling
+                try:
+                    input_ids = batch['input_ids'].to(device)
+                except Exception as e:
+                    print(f"Warning: Device allocation failed: {e}")
+                    input_ids = batch['input_ids'].to("cpu")
+                    model = model.to("cpu")
+                
+                if len(input_ids.shape) == 1:
+                    input_ids = input_ids.unsqueeze(0)
+                
+                # Create targets (shifted input)
+                target_ids = torch.roll(input_ids, shifts=-1, dims=-1)
+                target_ids[:, -1] = model.tokenizer.vocab[model.tokenizer.EOS_token]
+                
+                # Training step
+                optimizer.zero_grad()
+                
+                # Forward pass with error catching
+                try:
+                    logits = model(input_ids)
+                    loss = model.compute_loss(logits, target_ids)
+                except RuntimeError as e:
+                    if "MPS" in str(e):
+                        print("Warning: MPS error in forward pass, falling back to CPU")
+                        model = model.to("cpu")
+                        input_ids = input_ids.to("cpu")
+                        target_ids = target_ids.to("cpu")
+                        logits = model(input_ids)
+                        loss = model.compute_loss(logits, target_ids)
+                    else:
+                        raise e
+                
+                # Check loss validity
+                if not torch.isfinite(loss):
+                    print("Warning: Non-finite loss, skipping batch")
+                    continue
+                
+                if loss.item() > 100:
+                    print("Warning: Loss too high, skipping batch")
+                    continue
+                
+                # Backward pass with gradient clipping
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                optimizer.step()
+                
+                # Update statistics
+                epoch_loss += loss.item()
+                valid_batches += 1
+                
+                # Update progress bar
+                progress_bar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'avg_loss': f"{epoch_loss/valid_batches:.4f}",
+                    'valid_batches': valid_batches
+                })
+                
+            except RuntimeError as e:
+                print(f"Runtime error: {e}")
+                if "MPS" in str(e):
+                    print("Falling back to CPU")
+                    model = model.to("cpu")
+                continue
+            
+            finally:
+                try:
+                    clear_memory()
+                except:
+                    pass
+        
+        # Epoch summary
+        epoch_time = time.time() - start_time
+        avg_loss = epoch_loss / valid_batches if valid_batches > 0 else float('nan')
+        
+        print(f"\nEpoch {epoch+1} Summary:")
+        print(f"Average Loss: {avg_loss:.4f}")
+        print(f"Valid Batches: {valid_batches}/{total_batches}")
+        print(f"Time: {epoch_time:.2f}s")
+
+def generate_text(
+    model: QuantumLLM,
+    prompt: str,
+    max_length: int = 100,
+    temperature: float = 0.7
+) -> str:
+    """Generate text using the quantum language model"""
+    model.eval()
+    
+    # Encode prompt
+    input_ids = model.tokenizer.encode(prompt).unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        generated = input_ids
+        
+        for _ in range(max_length):
+            # Get predictions
+            logits = model(generated)
+            next_token_logits = logits[:, -1, :] / temperature
+            
+            # Sample next token
+            probs = F.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Check for EOS token
+            if next_token.item() == model.tokenizer.vocab[model.tokenizer.EOS_token]:
+                break
+            
+            # Append and continue
+            generated = torch.cat([generated, next_token], dim=1)
+        
+        # Decode the generated tokens
+        return model.tokenizer.decode(generated[0])
+
+def main(args):
+    # Load dataset with quantum tokenizer
+    dataset, tokenizer = load_quantum_wikitext(max_samples=args.max_samples)
+    
+    # Initialize quantum model
+    model = QuantumLLM(
+        tokenizer=tokenizer,
+        dim=64  # Using smaller dimension for quantum model
+    )
+    
+    # Explicitly move model to device
+    print(f"\nMoving model to device: {device}")
+    model = model.to(device)
+    
+    # Ensure all model components are on the correct device
+    for param in model.parameters():
+        param.data = param.data.to(device)
+    
+    # Move tokenizer phases to device if they exist
+    if hasattr(tokenizer, 'token_phases'):
+        tokenizer.token_phases = tokenizer.token_phases.to(device)
+    
+    if args.mode == 'train':
+        train_model(model, dataset, args)
+    elif args.mode == 'generate':
+        if not args.prompt:
+            raise ValueError("Prompt is required for text generation")
+        
+        generated_text = generate_text(
+            model,
+            args.prompt,
+            max_length=args.max_length,
+            temperature=args.temperature
+        )
+        print("Generated text:", generated_text)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Quantum-Inspired Language Model")
+    parser.add_argument('--mode', type=str, choices=['train', 'generate'], required=True,
+                      help="Mode: train or generate")
+    parser.add_argument('--prompt', type=str, help="Prompt for text generation")
+    parser.add_argument('--max_length', type=int, default=100,
+                      help="Maximum length of generated text")
+    parser.add_argument('--temperature', type=float, default=0.7,
+                      help="Temperature for text generation")
+    parser.add_argument('--max_samples', type=int, default=100,
+                      help="Maximum number of samples to load from dataset")
+    parser.add_argument('--epochs', type=int, default=3,
+                      help="Number of training epochs")
+
+    args = parser.parse_args()
+    main(args)

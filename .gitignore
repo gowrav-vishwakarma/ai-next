@@ -24,6 +24,7 @@ wheels/
 quantum_env/**
 quantum_env
 quantum_env/
+qvenv2/
 .env
 .venv
 env/
