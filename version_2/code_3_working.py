@@ -14,8 +14,21 @@ import os
 import shutil
 import pickle  # Add import for tokenizer serialization
 import traceback
+from dataclasses import dataclass
+from collections import defaultdict
 
 from library.quantum_ml import BasicQuantumAttention, QuantumEmbedding, QuantumTokenizer, SimpleQuantumState, create_quantum_tokenizer, DynamicPhaseSpace
+
+# Debug configuration
+DEBUG_MODE = True  # Set to False to disable detailed training analysis
+
+@dataclass
+class TokenStats:
+    """Track token statistics during training"""
+    epoch: int
+    avg_loss: float
+    token_counts: Dict[int, int]
+    total_tokens: int
 
 # Get best available device
 def get_device():
@@ -285,12 +298,63 @@ def get_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
         return latest_file
     return None
 
-class TokenStats:
-    """Class to track token statistics"""
-    def __init__(self, total_tokens: int, token_counts: Dict[int, int], avg_loss: float):
-        self.total_tokens = total_tokens
-        self.token_counts = token_counts
-        self.avg_loss = avg_loss
+def analyze_epoch_stats(model: QuantumLLM, logits: torch.Tensor, epoch: int, avg_loss: float) -> None:
+    """Fast analysis of epoch statistics"""
+    if not DEBUG_MODE:
+        return
+        
+    with torch.no_grad():
+        # Get predictions efficiently using max
+        predictions = logits.argmax(dim=-1)
+        
+        # Count tokens using bincount
+        token_counts = torch.bincount(
+            predictions.flatten(),
+            minlength=len(model.tokenizer)
+        ).cpu()
+        
+        # Create stats object
+        stats = TokenStats(
+            epoch=epoch,
+            avg_loss=avg_loss,
+            token_counts=dict(enumerate(token_counts.tolist())),
+            total_tokens=predictions.numel()
+        )
+        
+        # Print analysis
+        print(f"\nEpoch {epoch} Analysis:")
+        print(f"Average Loss: {avg_loss:.4f}")
+        print(f"Total Tokens: {stats.total_tokens}")
+        
+        # Quick vocabulary coverage
+        active_vocab = (token_counts > 0).sum().item()
+        vocab_size = len(model.tokenizer)
+        print(f"Active Vocabulary: {active_vocab} tokens ({active_vocab/vocab_size*100:.2f}%)")
+        
+        # Special token analysis
+        special_tokens = {
+            'EOS': model.tokenizer.vocab[model.tokenizer.EOS_token],
+            'PAD': model.tokenizer.vocab[model.tokenizer.PAD_token],
+            'BOS': model.tokenizer.vocab[model.tokenizer.BOS_token],
+            'UNK': model.tokenizer.vocab[model.tokenizer.UNK_token]
+        }
+        
+        print("\nSpecial Token Usage:")
+        for name, token_id in special_tokens.items():
+            count = token_counts[token_id].item()
+            percentage = (count / stats.total_tokens) * 100
+            print(f"{name}: {count} ({percentage:.2f}%)")
+        
+        # Top regular tokens (fast version)
+        print("\nTop Regular Tokens:")
+        special_ids = set(special_tokens.values())
+        regular_counts = [(i, c.item()) for i, c in enumerate(token_counts) 
+                         if i not in special_ids and c > 0]
+        
+        for token_id, count in sorted(regular_counts, key=lambda x: x[1], reverse=True)[:10]:
+            token = model.tokenizer.reverse_vocab.get(token_id, '<UNK>')
+            percentage = (count / stats.total_tokens) * 100
+            print(f"{token}: {count} ({percentage:.2f}%)")
 
 def get_autocast_device():
     """Get appropriate autocast device type"""
@@ -405,6 +469,9 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
         epoch_loss = 0.0
         valid_batches = 0
         
+        if DEBUG_MODE:
+            all_logits = []  # Store logits efficiently
+        
         # Create progress bar
         progress_bar = tqdm(range(0, num_samples, batch_size), desc="Training")
         
@@ -446,7 +513,10 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
                     epoch_loss += loss.item()
                     valid_batches += 1
                     
-                    # Update progress bar
+                    if DEBUG_MODE:
+                        # Store only predictions to save memory
+                        all_logits.append(logits.detach().argmax(dim=-1))
+                    
                     progress_bar.set_postfix({
                         'loss': f"{loss.item():.4f}",
                         'avg_loss': f"{epoch_loss/valid_batches:.4f}"
@@ -465,43 +535,15 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
         if valid_batches > 0:
             avg_loss = epoch_loss / valid_batches
             print(f"\nEpoch {epoch+1} - Average Loss: {avg_loss:.4f}")
+            
+            if DEBUG_MODE:
+                # Analyze efficiently
+                combined_logits = torch.cat(all_logits, dim=0)
+                analyze_epoch_stats(model, combined_logits.unsqueeze(-1), epoch + 1, avg_loss)
+            
             save_checkpoint(model, optimizer, epoch, avg_loss, args)
     
     return model, {'avg_loss': avg_loss if valid_batches > 0 else float('inf')}
-
-def analyze_epoch(model: QuantumLLM, stats: TokenStats, epoch: int):
-    """Analyze single epoch results"""
-    print(f"\nEpoch {epoch} Analysis (Avg Loss: {stats.avg_loss:.4f}):")
-    
-    # Special token analysis
-    special_tokens = {
-        'EOS': model.tokenizer.vocab[model.tokenizer.EOS_token],
-        'PAD': model.tokenizer.vocab[model.tokenizer.PAD_token],
-        'BOS': model.tokenizer.vocab[model.tokenizer.BOS_token],
-        'UNK': model.tokenizer.vocab[model.tokenizer.UNK_token]
-    }
-    
-    print("\nSpecial Token Usage:")
-    for name, token_id in special_tokens.items():
-        count = stats.token_counts.get(token_id, 0)
-        percentage = (count / stats.total_tokens) * 100 if stats.total_tokens > 0 else 0
-        print(f"{name}: {count} ({percentage:.2f}%)")
-    
-    # Regular token analysis
-    regular_tokens = {
-        token: count for token, count in stats.token_counts.items()
-        if token not in special_tokens.values()
-    }
-    
-    print("\nTop Regular Tokens:")
-    for token_id, count in sorted(regular_tokens.items(), key=lambda x: x[1], reverse=True)[:10]:
-        token = model.tokenizer.reverse_vocab.get(token_id, '<UNK>')
-        percentage = (count / stats.total_tokens) * 100 if stats.total_tokens > 0 else 0
-        print(f"{token}: {count} ({percentage:.2f}%)")
-    
-    # Coverage statistics
-    vocab_coverage = len(stats.token_counts) / len(model.tokenizer) * 100
-    print(f"\nVocabulary Coverage: {vocab_coverage:.2f}%")
 
 def analyze_token_distribution(model: QuantumLLM, stats_list: List[TokenStats]):
     """Analyze token distribution across all epochs"""
