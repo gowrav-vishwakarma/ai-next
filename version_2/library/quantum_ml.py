@@ -151,13 +151,16 @@ class QuantumTokenizer:
                 
                 vocab_size += 1
     
-    def encode(self, text: str) -> torch.Tensor:
+    def encode(self, text: str, add_special_tokens: bool = True) -> torch.Tensor:
         """Convert text to token IDs with phase information"""
         # Preprocess text
         words = re.findall(r'\b\w+\b|[^\w\s]', text.lower())
         
-        # Start with BOS token
-        tokens = [self.vocab[self.BOS_token]]
+        tokens = []
+        
+        # Add BOS token if requested
+        if add_special_tokens:
+            tokens.append(self.vocab[self.BOS_token])
         
         for word in words:
             if word in self.vocab:
@@ -168,18 +171,20 @@ class QuantumTokenizer:
                 for subword in subwords:
                     tokens.append(self.vocab.get(subword, self.vocab[self.UNK_token]))
         
-        # Add EOS token
-        tokens.append(self.vocab[self.EOS_token])
+        # Add EOS token if requested
+        if add_special_tokens:
+            tokens.append(self.vocab[self.EOS_token])
         
         return torch.tensor(tokens, dtype=torch.long)
     
-    def decode(self, tokens: torch.Tensor) -> str:
+    def decode(self, tokens: torch.Tensor, skip_special_tokens: bool = True) -> str:
         """Convert token IDs back to text"""
         words = []
         for token in tokens.tolist():
             word = self.reverse_vocab.get(token, self.UNK_token)
-            if word not in self.special_tokens:
-                words.append(word)
+            if skip_special_tokens and word in self.special_tokens:
+                continue
+            words.append(word)
         return ' '.join(words)
     
     def get_phase_encoding(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -288,72 +293,227 @@ class SimpleQuantumState(nn.Module):
         
         return combined_real, combined_imag
 
+class DynamicPhaseSpace(nn.Module):
+    """Implements dynamic phase space representation"""
+    def __init__(self, dim: int, num_layers: int = 3):
+        super().__init__()
+        self.dim = dim
+        self.num_layers = num_layers
+        self.PHI = (1 + math.sqrt(5)) / 2
+        
+        # Phase spaces for different semantic layers
+        self.layer_phases = nn.ParameterList([
+            nn.Parameter(torch.zeros(dim)) for _ in range(num_layers)
+        ])
+        
+        # Quantum interference mixers
+        self.interference_weights = nn.ParameterList([
+            nn.Parameter(torch.randn(dim) * 0.02) for _ in range(num_layers)
+        ])
+        
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(dim, eps=1e-8) for _ in range(num_layers)
+        ])
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, _ = x.shape
+        
+        real_parts = []
+        imag_parts = []
+        
+        for layer_idx in range(self.num_layers):
+            # Generate dynamic phase angles
+            phase_angles = torch.tanh(self.layer_phases[layer_idx]) * math.pi
+            
+            # Create quantum state
+            real = x * torch.cos(phase_angles)
+            imag = x * torch.sin(phase_angles)
+            
+            # Normalize
+            real = self.layer_norms[layer_idx](real)
+            imag = self.layer_norms[layer_idx](imag)
+            
+            # Apply interference
+            interference = torch.tanh(self.interference_weights[layer_idx])
+            real = real * interference
+            imag = imag * interference
+            
+            real_parts.append(real)
+            imag_parts.append(imag)
+        
+        # Combine through quantum interference
+        final_real = torch.zeros_like(x)
+        final_imag = torch.zeros_like(x)
+        
+        for i in range(self.num_layers):
+            # Calculate phase factor components separately using PyTorch operations
+            angle = 2 * math.pi * i / self.num_layers
+            phase_factor_real = torch.cos(torch.tensor(angle))
+            phase_factor_imag = torch.sin(torch.tensor(angle))
+            
+            # Apply phase factor to real and imaginary parts
+            final_real += real_parts[i] * phase_factor_real - imag_parts[i] * phase_factor_imag
+            final_imag += real_parts[i] * phase_factor_imag + imag_parts[i] * phase_factor_real
+        
+        # Normalize
+        norm = torch.sqrt(final_real.pow(2) + final_imag.pow(2) + 1e-8)
+        final_real = final_real / norm
+        final_imag = final_imag / norm
+        
+        return final_real, final_imag
+
+class QuantumCoherenceLayer(nn.Module):
+    """Maintains quantum coherence through active phase management"""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+        self.PHI = (1 + math.sqrt(5)) / 2
+        
+        # Phase management parameters
+        self.phase_matrix = nn.Parameter(torch.randn(dim, dim) * 0.02)
+        self.coherence_factor = nn.Parameter(torch.ones(1) * 0.1)
+        
+        # Quantum state normalization
+        self.state_norm = nn.LayerNorm(dim, eps=1e-8)
+    
+    def compute_coherence_factor(self, x_real: torch.Tensor, x_imag: torch.Tensor) -> torch.Tensor:
+        """Compute quantum coherence measure"""
+        # Extract phases
+        phases = torch.atan2(x_imag + 1e-8, x_real + 1e-8)
+        
+        # Compute phase differences between all pairs
+        phase_diffs = phases.unsqueeze(-2) - phases.unsqueeze(-1)
+        
+        # Calculate coherence using quantum-inspired cosine measure
+        coherence = torch.mean(torch.cos(phase_diffs), dim=(-1, -2))
+        return coherence.unsqueeze(-1)
+    
+    def forward(self, x_real: torch.Tensor, x_imag: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Compute current coherence
+        coherence = self.compute_coherence_factor(x_real, x_imag)
+        
+        # Dynamic phase adjustment based on coherence
+        phase_adjustment = torch.matmul(x_real, self.phase_matrix) * self.coherence_factor * (1 - coherence)
+        
+        # Apply phase rotation
+        new_real = x_real * torch.cos(phase_adjustment) - x_imag * torch.sin(phase_adjustment)
+        new_imag = x_real * torch.sin(phase_adjustment) + x_imag * torch.cos(phase_adjustment)
+        
+        # Normalize while preserving phase relationships
+        norm = torch.sqrt(new_real.pow(2) + new_imag.pow(2) + 1e-8)
+        new_real = new_real / norm
+        new_imag = new_imag / norm
+        
+        return self.state_norm(new_real), self.state_norm(new_imag)
+
+class TokenDistributionRegulator(nn.Module):
+    """Actively maintains token distribution through quantum interference"""
+    def __init__(self, vocab_size: int, dim: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.dim = dim
+        
+        # Target distribution parameters
+        self.register_buffer('target_dist', self._initialize_target_distribution())
+        
+        # Phase-based regulation parameters
+        self.regulation_strength = nn.Parameter(torch.ones(1) * 0.1)
+        self.phase_factors = nn.Parameter(torch.randn(vocab_size) * 0.02)
+    
+    def _initialize_target_distribution(self) -> torch.Tensor:
+        """Initialize target distribution following Zipf's law"""
+        ranks = torch.arange(1, self.vocab_size + 1, dtype=torch.float32)
+        dist = 1 / (ranks * torch.log(ranks + 1))
+        return dist / dist.sum()
+    
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        # Get current token distribution
+        token_probs = torch.softmax(logits, dim=-1)
+        batch_dist = token_probs.mean(dim=[0, 1])
+        
+        # Compute distribution divergence
+        kl_div = F.kl_div(
+            batch_dist.log(),
+            self.target_dist.to(logits.device),
+            reduction='batchmean'
+        )
+        
+        # Apply phase-based regulation
+        phase_adjustment = torch.tanh(self.phase_factors) * self.regulation_strength * kl_div
+        
+        # Adjust logits through phase rotation
+        adjusted_logits = logits + phase_adjustment.unsqueeze(0).unsqueeze(0)
+        
+        return adjusted_logits
+
+# Update BasicQuantumAttention to use coherence
 class BasicQuantumAttention(nn.Module):
-    """
-    Memory-efficient quantum attention using phase relationships
-    """
+    """Enhanced quantum attention with coherence preservation"""
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
         self.scale = dim ** -0.5
         
-        # Add more layer norms
+        # Phase-aware projections
+        self.q_phase = nn.Linear(dim, dim, bias=False)
+        self.k_phase = nn.Linear(dim, dim, bias=False)
+        self.v_phase = nn.Linear(dim, dim, bias=False)
+        
+        # Initialize with small weights
+        for layer in [self.q_phase, self.k_phase, self.v_phase]:
+            nn.init.normal_(layer.weight, mean=0.0, std=0.02)
+        
         self.q_norm = nn.LayerNorm(dim)
         self.k_norm = nn.LayerNorm(dim)
         self.v_norm = nn.LayerNorm(dim)
         self.output_norm = nn.LayerNorm(dim)
+    
+    def compute_interference(self, q_real: torch.Tensor, q_imag: torch.Tensor, 
+                           k_real: torch.Tensor, k_imag: torch.Tensor) -> torch.Tensor:
+        """Compute interference pattern between query and key states"""
+        B, L, D = q_real.shape  # batch size, sequence length, dimension
         
-    def forward(self, q_real, q_imag, k_real, k_imag, v_real, v_imag):
-        # Apply layer norm and scaling
-        q_real = self.q_norm(q_real) * 0.01
-        q_imag = self.q_norm(q_imag) * 0.01
-        k_real = self.k_norm(k_real) * 0.01
-        k_imag = self.k_norm(k_imag) * 0.01
-        v_real = self.v_norm(v_real) * 0.01
-        v_imag = self.v_norm(v_imag) * 0.01
+        # Extract phases
+        q_phase = torch.atan2(q_imag + 1e-8, q_real + 1e-8)
+        k_phase = torch.atan2(k_imag + 1e-8, k_real + 1e-8)
         
-        # Get dimensions
-        B, L, D = q_real.shape
+        # Reshape for attention computation
+        q_phase = q_phase.view(B, L, 1, D)  # [B, L, 1, D]
+        k_phase = k_phase.view(B, 1, L, D)  # [B, 1, L, D]
         
-        # Process in smaller chunks
-        chunk_size = min(L, 32)  # Smaller chunks
-        output_real = torch.zeros(B, L, D, device=q_real.device, dtype=q_real.dtype)
-        output_imag = torch.zeros(B, L, D, device=q_imag.device, dtype=q_imag.dtype)
+        # Phase difference
+        phase_diff = q_phase - k_phase  # [B, L, L, D]
         
-        for i in range(0, L, chunk_size):
-            j = min(i + chunk_size, L)
-            
-            # Get current chunk
-            q_real_chunk = q_real[:, i:j].contiguous()
-            q_imag_chunk = q_imag[:, i:j].contiguous()
-            
-            # Compute attention scores with residual connection
-            real_diff = (q_real_chunk.unsqueeze(2) - k_real.unsqueeze(1)) * self.scale
-            imag_diff = (q_imag_chunk.unsqueeze(2) - k_imag.unsqueeze(1)) * self.scale
-            
-            # Sum with stability term
-            real_sum = torch.sum(real_diff, dim=-1) + 1e-8
-            imag_sum = torch.sum(imag_diff, dim=-1) + 1e-8
-            
-            # Compute stable phase difference
-            phase_diff = torch.atan2(imag_sum, real_sum)
-            
-            # Compute stable attention weights
-            attn_weights = torch.softmax(torch.cos(phase_diff) * 10.0, dim=-1)
-            
-            # Apply attention with scaled values
-            chunk_real = torch.bmm(attn_weights, v_real) * 0.1
-            chunk_imag = torch.bmm(attn_weights, v_imag) * 0.1
-            
-            output_real[:, i:j] = chunk_real
-            output_imag[:, i:j] = chunk_imag
-            
-            # Clear memory
-            del real_diff, imag_diff, phase_diff, attn_weights, chunk_real, chunk_imag
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        # Interference pattern (sum over dimension)
+        interference = torch.cos(phase_diff).sum(dim=-1) * self.scale  # [B, L, L]
+        coherence = torch.exp(-torch.abs(phase_diff).sum(dim=-1))  # [B, L, L]
+        
+        return interference * coherence
+    
+    def forward(self, q_real: torch.Tensor, q_imag: torch.Tensor,
+                k_real: torch.Tensor, k_imag: torch.Tensor,
+                v_real: torch.Tensor, v_imag: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass with proper shape handling"""
+        # Project and normalize
+        q_real = self.q_norm(self.q_phase(q_real))
+        q_imag = self.q_norm(self.q_phase(q_imag))
+        k_real = self.k_norm(self.k_phase(k_real))
+        k_imag = self.k_norm(self.k_phase(k_imag))
+        v_real = self.v_norm(self.v_phase(v_real))
+        v_imag = self.v_norm(self.v_phase(v_imag))
+        
+        # Compute attention through interference [B, L, L]
+        attn_weights = self.compute_interference(q_real, q_imag, k_real, k_imag)
+        
+        # Apply softmax
+        attn_weights = F.softmax(attn_weights / 0.1, dim=-1)  # [B, L, L]
+        
+        # Apply attention to values
+        out_real = torch.bmm(attn_weights, v_real)  # [B, L, D]
+        out_imag = torch.bmm(attn_weights, v_imag)  # [B, L, D]
         
         # Final normalization
-        output_real = self.output_norm(output_real)
-        output_imag = self.output_norm(output_imag)
+        out_real = self.output_norm(out_real)
+        out_imag = self.output_norm(out_imag)
         
-        return output_real, output_imag
+        return out_real, out_imag
