@@ -431,29 +431,7 @@ class TokenDistributionRegulator(nn.Module):
         
         return adjusted_logits
 
-# Add the complex_attention function to compute attention scores using complex multiplication
-def complex_attention(q_real: torch.Tensor, q_imag: torch.Tensor,
-                     k_real: torch.Tensor, k_imag: torch.Tensor,
-                     v_real: torch.Tensor, v_imag: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute attention scores using complex multiplication."""
-    # Compute the complex conjugate of the key components
-    k_real_conj = k_real
-    k_imag_conj = -k_imag
-
-    # Perform complex multiplication to compute attention scores
-    attn_real = q_real * k_real_conj - q_imag * k_imag_conj
-    attn_imag = q_real * k_imag_conj + q_imag * k_real_conj
-
-    # Normalize the attention scores using softmax
-    attention_weights = F.softmax(attn_real.pow(2) + attn_imag.pow(2), dim=-1)
-
-    # Apply the weights to the value components
-    output_real = attention_weights @ v_real
-    output_imag = attention_weights @ v_imag
-
-    return output_real, output_imag
-
-# Update the BasicQuantumAttention class to use complex_attention
+# Update BasicQuantumAttention to use coherence
 class BasicQuantumAttention(nn.Module):
     """Optimized quantum attention"""
     def __init__(self, dim: int):
@@ -490,10 +468,24 @@ class BasicQuantumAttention(nn.Module):
         k_imag = self.k_proj(k_imag)
         v_real = self.v_proj(v_real)
         v_imag = self.v_proj(v_imag)
-
-        # Use the new complex_attention function
-        out_real, out_imag = complex_attention(q_real, q_imag, k_real, k_imag, v_real, v_imag)
-
+        
+        # Compute attention scores
+        attn_real = torch.matmul(q_real, k_real.transpose(-2, -1)) * self.scale
+        attn_imag = torch.matmul(q_imag, k_imag.transpose(-2, -1)) * self.scale
+        
+        # Apply padding mask if provided
+        if pad_mask is not None:
+            pad_mask = pad_mask.unsqueeze(1)  # [B, 1, L]
+            attn_real = attn_real.masked_fill(pad_mask, float('-inf'))
+            attn_imag = attn_imag.masked_fill(pad_mask, float('-inf'))
+        
+        # Apply softmax
+        attn_weights = torch.softmax(attn_real + attn_imag, dim=-1)
+        
+        # Compute output
+        out_real = torch.matmul(attn_weights, v_real)
+        out_imag = torch.matmul(attn_weights, v_imag)
+        
         # Apply normalization
         out_real = self.norm(out_real)
         out_imag = self.norm(out_imag)
