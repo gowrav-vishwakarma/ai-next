@@ -17,10 +17,13 @@ import traceback
 from dataclasses import dataclass
 from collections import defaultdict
 
-from library.quantum_ml import BasicQuantumAttention, QuantumEmbedding, QuantumTokenizer, SimpleQuantumState, create_quantum_tokenizer, DynamicPhaseSpace
+from library.quantum_ml import (
+    BasicQuantumAttention, QuantumEmbedding, QuantumTokenizer, 
+    SimpleQuantumState, create_quantum_tokenizer, compute_enhanced_quantum_loss
+)
 
 # Debug configuration
-DEBUG_MODE = True  # Set to False to disable detailed training analysis
+DEBUG_MODE = False  # Set to False to disable detailed training analysis
 
 @dataclass
 class TokenStats:
@@ -61,6 +64,62 @@ def clear_memory():
     except Exception as e:
         print(f"Warning: Memory clearing failed: {e}")
 
+class EnhancedDynamicPhaseSpace(nn.Module):
+    """Enhanced dynamic phase space with quantum collapse prevention"""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+        self.quantum_state = SimpleQuantumState(dim)  # Use existing quantum state
+        
+        # Anti-collapse mechanism
+        self.energy_levels = nn.Parameter(torch.linspace(0, 1, dim))
+        self.excitation_factor = nn.Parameter(torch.ones(1) * 0.1)
+    
+    def forward(self, x: torch.Tensor, pad_token_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Get base quantum state
+        real, imag = self.quantum_state(x)
+        
+        # Add collapse prevention
+        amplitude = torch.sqrt(real.pow(2) + imag.pow(2) + 1e-8)
+        is_collapsing = (amplitude < 0.1).float()
+        
+        excitation = torch.exp(self.energy_levels) * self.excitation_factor
+        real = real + is_collapsing * excitation.unsqueeze(0).unsqueeze(0)
+        imag = imag + is_collapsing * excitation.unsqueeze(0).unsqueeze(0)
+        
+        # Renormalize
+        norm = torch.sqrt(real.pow(2) + imag.pow(2) + 1e-8)
+        real = real / norm
+        imag = imag / norm
+        
+        return real, imag
+
+class QuantumStatePreservingAttention(BasicQuantumAttention):
+    """Enhanced quantum attention mechanism that preserves quantum coherence"""
+    def __init__(self, dim: int):
+        super().__init__(dim)
+        
+        # Additional quantum state preservation
+        self.phase_preservation = nn.Parameter(torch.ones(dim) * 0.1)
+        
+    def forward(self, q_real: torch.Tensor, q_imag: torch.Tensor,
+                k_real: torch.Tensor, k_imag: torch.Tensor,
+                v_real: torch.Tensor, v_imag: torch.Tensor,
+                pad_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        # Get base attention outputs
+        out_real, out_imag = super().forward(q_real, q_imag, k_real, k_imag, v_real, v_imag)
+        
+        # Additional phase preservation
+        phase = torch.atan2(out_imag + 1e-8, out_real + 1e-8)
+        preservation = torch.sigmoid(self.phase_preservation)
+        
+        # Apply phase preservation
+        out_real = out_real * torch.cos(phase * preservation.unsqueeze(0).unsqueeze(0))
+        out_imag = out_imag * torch.sin(phase * preservation.unsqueeze(0).unsqueeze(0))
+        
+        return out_real, out_imag
+
 class QuantumLLM(nn.Module):
     """Enhanced quantum language model with proper phase preservation"""
     def __init__(self, tokenizer: QuantumTokenizer, dim: int):
@@ -68,16 +127,16 @@ class QuantumLLM(nn.Module):
         self.tokenizer = tokenizer
         self.dim = dim
         
-        # Dynamic phase space
-        self.phase_space = DynamicPhaseSpace(dim)
+        # Replace DynamicPhaseSpace with EnhancedDynamicPhaseSpace
+        self.phase_space = EnhancedDynamicPhaseSpace(dim)
         
         # Quantum embedding
         self.embedding = QuantumEmbedding(tokenizer, dim)
         
-        # Multi-layer quantum processing
+        # Multi-layer quantum processing with enhanced attention
         self.layers = nn.ModuleList([
             nn.ModuleDict({
-                'attention': BasicQuantumAttention(dim),
+                'attention': QuantumStatePreservingAttention(dim),
                 'phase_norm': nn.LayerNorm(dim, eps=1e-8)
             }) for _ in range(3)
         ])
@@ -92,14 +151,21 @@ class QuantumLLM(nn.Module):
         # Get quantum embeddings
         real_embed, imag_embed = self.embedding(x)
         
-        # Process through dynamic phase space
-        real, imag = self.phase_space(real_embed)
+        # Get PAD token ID for collapse prevention
+        pad_token_id = self.tokenizer.vocab[self.tokenizer.PAD_token]
         
-        # Process through quantum layers
+        # Process through enhanced phase space
+        real, imag = self.phase_space(real_embed, pad_token_id)
+        
+        # Create padding mask for attention
+        pad_mask = (x == pad_token_id)
+        
+        # Process through quantum layers with enhanced attention
         for layer in self.layers:
-            # Quantum attention with interference
+            # Enhanced quantum attention
             attn_real, attn_imag = layer['attention'](
-                real, imag, real, imag, real, imag
+                real, imag, real, imag, real, imag,
+                pad_mask=pad_mask
             )
             
             # Phase-preserving residual
@@ -168,6 +234,15 @@ def load_quantum_wikitext(max_samples: Optional[int] = None):
     
     # Extract texts
     texts = [example['text'] for example in dataset]
+    
+    # Save dataset to file
+    script_name = os.path.basename(__file__)  # Gets the current file name
+    dataset_file = script_name.rsplit('.', 1)[0] + "_dataset.txt"  # Creates filename_dataset.txt
+    
+    print(f"Saving dataset to {dataset_file}...")
+    with open(dataset_file, 'w', encoding='utf-8') as f:
+        for text in texts:
+            f.write(text + "\n")
     
     # Create and train tokenizer
     print("Creating quantum tokenizer...")
@@ -366,86 +441,27 @@ def get_autocast_device():
 
 def compute_quantum_loss(model: QuantumLLM, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     """Enhanced loss function with explicit coherence and diversity terms"""
-    # Base cross entropy
-    ce_loss = F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
-        targets.view(-1),
-        ignore_index=model.tokenizer.vocab[model.tokenizer.PAD_token]
+    return compute_enhanced_quantum_loss(
+        model,
+        logits,
+        targets,
+        pad_token_id=model.tokenizer.vocab[model.tokenizer.PAD_token]
     )
-    
-    # Get probability distribution
-    with torch.no_grad():  # Reduce memory usage
-        probs = F.softmax(logits, dim=-1)
-        token_dist = probs.mean(dim=[0, 1])
-    
-    # Compute coherence loss in very small chunks
-    chunk_size = 4  # Much smaller chunks for limited memory
-    mini_batch = 2  # Process even smaller batches at a time
-    B, L, V = logits.shape
-    coherence_loss = 0.0
-    num_chunks = 0
-    
-    # Get appropriate autocast type
-    autocast_device = get_autocast_device()
-    
-    # Process in mini-batches to save memory
-    for b in range(0, B, mini_batch):
-        b_end = min(b + mini_batch, B)
-        batch_logits = logits[b:b_end]
-        
-        for i in range(0, L, chunk_size):
-            j = min(i + chunk_size, L)
-            try:
-                # Take a small chunk of the logits
-                chunk = batch_logits[:, i:j, :]
-                
-                # Free unused memory
-                if device == "mps":
-                    torch.mps.empty_cache()
-                
-                # Compute phase differences for this small chunk
-                with torch.amp.autocast(device_type=autocast_device, enabled=True):
-                    chunk_phases = torch.atan2(
-                        chunk.unsqueeze(-2),  # [mini_batch, chunk_size, 1, V]
-                        chunk.unsqueeze(-1)   # [mini_batch, chunk_size, V, 1]
-                    )
-                    
-                    # Compute coherence for this chunk
-                    chunk_coherence = -torch.mean(torch.cos(chunk_phases))
-                    coherence_loss += chunk_coherence.item()  # Convert to scalar immediately
-                    num_chunks += 1
-                
-                # Clear memory
-                del chunk_phases
-                del chunk_coherence
-                if device == "mps":
-                    torch.mps.empty_cache()
-                
-            except RuntimeError as e:
-                print(f"Warning: Chunk processing failed, skipping chunk: {str(e)}")
-                continue
-    
-    # Average the coherence loss
-    coherence_loss = coherence_loss / max(num_chunks, 1)
-    
-    # Diversity loss using entropy (computed on full distribution)
-    with torch.no_grad():  # Reduce memory usage
-        diversity_loss = -(token_dist * torch.log(token_dist + 1e-10)).sum()
-    
-    # Combine losses with weights
-    total_loss = (
-        ce_loss +
-        0.2 * coherence_loss +  # Coherence weight
-        0.1 * (1.0 - torch.clamp(diversity_loss, 0.0, 0.5))  # Diversity weight
-    )
-    
-    return total_loss
 
 def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
     print(f"Training on device: {device}")
     model = model.to(device)
     
-    # Use smaller learning rate
+    # Even smaller batch size
+    batch_size = 2  # Reduced further for memory constraints
+    
+    # Get appropriate autocast type
+    autocast_device = get_autocast_device()
+    
+    # Use gradient accumulation
+    gradient_accumulation_steps = 4
+    effective_batch_size = batch_size * gradient_accumulation_steps
+    
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=2e-5,
@@ -454,13 +470,6 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
         weight_decay=0.02
     )
     
-    # Create very small batches for limited memory
-    batch_size = 4  # Reduced batch size for 8GB RAM
-    
-    # Get appropriate autocast type
-    autocast_device = get_autocast_device()
-    
-    # Dataset is already a tensor from load_quantum_wikitext
     num_samples = len(dataset)
     
     for epoch in range(args.epochs):
@@ -468,11 +477,8 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
         model.train()
         epoch_loss = 0.0
         valid_batches = 0
+        optimizer.zero_grad(set_to_none=True)
         
-        if DEBUG_MODE:
-            all_logits = []  # Store logits efficiently
-        
-        # Create progress bar
         progress_bar = tqdm(range(0, num_samples, batch_size), desc="Training")
         
         for i in progress_bar:
@@ -480,10 +486,7 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
                 # Clear memory before each batch
                 clear_memory()
                 
-                # Get batch indices
                 batch_end = min(i + batch_size, num_samples)
-                
-                # Get batch directly from tensor
                 input_ids = dataset[i:batch_end].to(device)
                 
                 # Create targets
@@ -494,35 +497,34 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
                 pad_mask = (input_ids == model.tokenizer.vocab[model.tokenizer.PAD_token])
                 seq_lengths = torch.argmax(pad_mask.float(), dim=1)
                 for idx, length in enumerate(seq_lengths):
-                    if length == 0:  # No padding found
+                    if length == 0:
                         length = input_ids.size(1) - 1
                     target_ids[idx, length] = model.tokenizer.vocab[model.tokenizer.EOS_token]
                 
-                # Training step with memory optimization
-                optimizer.zero_grad(set_to_none=True)  # More memory efficient
-                
+                # Forward pass with memory optimization
                 with torch.amp.autocast(device_type=autocast_device, enabled=True):
                     logits = model(input_ids)
                     loss = compute_quantum_loss(model, logits, target_ids)
+                    loss = loss / gradient_accumulation_steps  # Scale loss for accumulation
                 
                 if torch.isfinite(loss):
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
                     
-                    epoch_loss += loss.item()
+                    # Step optimizer only after accumulating gradients
+                    if (i // batch_size + 1) % gradient_accumulation_steps == 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                    
+                    epoch_loss += loss.item() * gradient_accumulation_steps
                     valid_batches += 1
                     
-                    if DEBUG_MODE:
-                        # Store only predictions to save memory
-                        all_logits.append(logits.detach().argmax(dim=-1))
-                    
                     progress_bar.set_postfix({
-                        'loss': f"{loss.item():.4f}",
+                        'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
                         'avg_loss': f"{epoch_loss/valid_batches:.4f}"
                     })
                 
-                # Clear memory after each batch
+                # Clear memory
                 del logits, loss, input_ids, target_ids
                 clear_memory()
                 
@@ -535,12 +537,6 @@ def train_model(model: QuantumLLM, dataset, args: argparse.Namespace):
         if valid_batches > 0:
             avg_loss = epoch_loss / valid_batches
             print(f"\nEpoch {epoch+1} - Average Loss: {avg_loss:.4f}")
-            
-            if DEBUG_MODE:
-                # Analyze efficiently
-                combined_logits = torch.cat(all_logits, dim=0)
-                analyze_epoch_stats(model, combined_logits.unsqueeze(-1), epoch + 1, avg_loss)
-            
             save_checkpoint(model, optimizer, epoch, avg_loss, args)
     
     return model, {'avg_loss': avg_loss if valid_batches > 0 else float('inf')}
@@ -731,10 +727,11 @@ def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, tempera
                 probs = probs / probs.sum()
                 
                 # Debug probability distribution
-                top_probs, top_tokens = torch.topk(probs, 5)
-                print(f"\nStep {i}:")
-                print(f"Top 5 tokens: {top_tokens[0].tolist()}")
-                print(f"Top 5 probs: {top_probs[0].tolist()}")
+                if DEBUG_MODE:
+                    top_probs, top_tokens = torch.topk(probs, 5)
+                    print(f"\nStep {i}:")
+                    print(f"Top 5 tokens: {top_tokens[0].tolist()}")
+                    print(f"Top 5 probs: {top_probs[0].tolist()}")
                 
                 # Sample next token
                 next_token = torch.multinomial(probs, num_samples=1)
@@ -753,9 +750,10 @@ def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, tempera
                 # Append and continue
                 generated = torch.cat([generated, next_token], dim=1)
                 
-                # Show current text
-                current_text = model.tokenizer.decode(generated[0].cpu(), skip_special_tokens=True)
-                print(f"Current text: '{current_text}'")
+                if DEBUG_MODE:
+                    # Show current text
+                    current_text = model.tokenizer.decode(generated[0].cpu(), skip_special_tokens=True)
+                    print(f"Current text: '{current_text}'")
                 
             except Exception as e:
                 print(f"Error during generation step {i}: {str(e)}")
@@ -765,9 +763,10 @@ def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, tempera
         # Final decoding
         try:
             result = model.tokenizer.decode(generated[0].cpu(), skip_special_tokens=True)
-            print(f"\nFinal Debug:")
-            print(f"Generated tokens: {generated_tokens}")
-            print(f"Final tensor shape: {generated.shape}")
+            if DEBUG_MODE:
+                print(f"\nFinal Debug:")
+                print(f"Generated tokens: {generated_tokens}")
+                print(f"Final tensor shape: {generated.shape}")
             return result
         except Exception as e:
             print(f"Error during final decoding: {str(e)}")

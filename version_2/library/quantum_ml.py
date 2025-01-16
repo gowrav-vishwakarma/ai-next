@@ -517,3 +517,79 @@ class BasicQuantumAttention(nn.Module):
         out_imag = self.output_norm(out_imag)
         
         return out_real, out_imag
+
+def compute_enhanced_quantum_loss(
+    model: 'QuantumLLM',
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pad_token_id: int
+) -> torch.Tensor:
+    """
+    Enhanced quantum loss function that prevents collapse to PAD token
+    with memory-efficient implementation
+    """
+    # Regular cross entropy with greater penalty for PAD predictions
+    ce_loss = F.cross_entropy(
+        logits.view(-1, logits.size(-1)),
+        targets.view(-1),
+        ignore_index=pad_token_id,
+        reduction='none'
+    )
+    
+    # Get probabilities
+    with torch.no_grad():
+        probs = F.softmax(logits, dim=-1)
+    
+    # Penalize PAD token predictions heavily
+    pad_probs = probs[:, :, pad_token_id]
+    pad_penalty = torch.mean(pad_probs.pow(2)) * 10.0
+    
+    # Encourage token diversity
+    with torch.no_grad():
+        token_dist = probs.mean(dim=[0, 1])
+        diversity_loss = -(token_dist * torch.log(token_dist + 1e-10)).sum()
+    
+    # Compute coherence loss in small chunks to save memory
+    coherence_loss = 0.0
+    num_chunks = 0
+    chunk_size = 32  # Smaller chunks
+    B, L, V = logits.shape
+    
+    with torch.no_grad():
+        for i in range(0, L, chunk_size):
+            j = min(i + chunk_size, L)
+            chunk = logits[:, i:j, :]
+            
+            # Process each batch item separately
+            for b in range(B):
+                # Get chunk for this batch
+                batch_chunk = chunk[b:b+1]  # Keep dimension
+                
+                # Compute phase angles for this small chunk
+                chunk_real = batch_chunk.unsqueeze(-2)  # [1, chunk_size, 1, V]
+                chunk_imag = batch_chunk.unsqueeze(-1)  # [1, chunk_size, V, 1]
+                
+                # Compute phase difference
+                phase_diff = torch.atan2(chunk_real, chunk_imag + 1e-8)
+                
+                # Compute coherence for this chunk
+                chunk_coherence = -torch.mean(torch.cos(phase_diff))
+                coherence_loss += chunk_coherence.item()
+                num_chunks += 1
+                
+                # Clear unnecessary tensors
+                del phase_diff, chunk_coherence
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    # Average coherence loss
+    coherence_loss = coherence_loss / max(num_chunks, 1)
+    
+    # Combine losses with weights
+    total_loss = (
+        ce_loss.mean() +
+        pad_penalty +  # Heavy penalty for PAD collapse
+        0.2 * coherence_loss +  # Maintain quantum coherence
+        0.1 * (1.0 - torch.clamp(diversity_loss, 0.0, 0.5))  # Encourage diversity
+    )
+    
+    return total_loss
