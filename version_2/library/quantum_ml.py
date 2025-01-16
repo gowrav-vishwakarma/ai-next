@@ -64,9 +64,10 @@ class ConceptMapper:
         self.word_to_concept[word] = new_concept_id
         return new_concept_id
 
-class QuantumTokenizer:
-    """Quantum-inspired tokenizer that uses concepts and subwords"""
+class QuantumTokenizer(nn.Module):
+    """Optimized quantum tokenizer"""
     def __init__(self, dim: int = 64, max_vocab_size: int = 8192):
+        super().__init__()
         self.dim = dim
         self.max_vocab_size = max_vocab_size
         self.concept_mapper = ConceptMapper(dim)
@@ -84,15 +85,16 @@ class QuantumTokenizer:
         
         # Phase space encodings for tokens
         self.token_phases = nn.Parameter(torch.zeros(max_vocab_size, dim))
+        
+        # Pre-compute special token phases
         self._initialize_special_token_phases()
     
     def _initialize_special_token_phases(self):
-        """Initialize phase encodings for special tokens"""
-        with torch.no_grad():
-            for i, token in enumerate(self.special_tokens):
-                # Generate unique, stable phases for special tokens
-                phases = torch.linspace(0, 2*math.pi, self.dim) * (i + 1) / len(self.special_tokens)
-                self.token_phases[i] = torch.sin(phases)
+        """Initialize special token phases without JIT"""
+        phases = torch.zeros(len(self.special_tokens), self.dim)
+        for i, _ in enumerate(self.special_tokens):
+            phases[i] = torch.sin(torch.linspace(0, 2*math.pi, self.dim) * (i + 1) / len(self.special_tokens))
+        self.register_buffer('special_token_phases', phases)
     
     def _split_into_subwords(self, word: str) -> List[str]:
         """Split word into subwords based on common patterns"""
@@ -152,30 +154,39 @@ class QuantumTokenizer:
                 vocab_size += 1
     
     def encode(self, text: str, add_special_tokens: bool = True) -> torch.Tensor:
-        """Convert text to token IDs with phase information"""
-        # Preprocess text
+        """Optimized encoding"""
+        # Use pre-tokenized cache if available
+        cache_key = hash(text)
+        if hasattr(self, '_token_cache') and cache_key in self._token_cache:
+            return self._token_cache[cache_key]
+        
+        # Fast tokenization using regex
         words = re.findall(r'\b\w+\b|[^\w\s]', text.lower())
         
-        tokens = []
+        # Pre-allocate token list
+        max_tokens = len(words) + 2 if add_special_tokens else len(words)
+        tokens = torch.zeros(max_tokens, dtype=torch.long)
+        idx = 0
         
-        # Add BOS token if requested
         if add_special_tokens:
-            tokens.append(self.vocab[self.BOS_token])
+            tokens[idx] = self.vocab[self.BOS_token]
+            idx += 1
         
+        # Vectorized vocabulary lookup
         for word in words:
-            if word in self.vocab:
-                tokens.append(self.vocab[word])
-            else:
-                # Split unknown words into subwords
-                subwords = self._split_into_subwords(word)
-                for subword in subwords:
-                    tokens.append(self.vocab.get(subword, self.vocab[self.UNK_token]))
+            tokens[idx] = self.vocab.get(word, self.vocab[self.UNK_token])
+            idx += 1
         
-        # Add EOS token if requested
         if add_special_tokens:
-            tokens.append(self.vocab[self.EOS_token])
+            tokens[idx] = self.vocab[self.EOS_token]
+            idx += 1
         
-        return torch.tensor(tokens, dtype=torch.long)
+        # Cache result
+        if not hasattr(self, '_token_cache'):
+            self._token_cache = {}
+        self._token_cache[cache_key] = tokens[:idx]
+        
+        return tokens[:idx]
     
     def decode(self, tokens: torch.Tensor, skip_special_tokens: bool = True) -> str:
         """Convert token IDs back to text"""
@@ -236,62 +247,36 @@ def create_quantum_tokenizer(texts: List[str], dim: int = 64, max_vocab_size: in
 
 
 class SimpleQuantumState(nn.Module):
-    """
-    Simplified quantum state representation with just two layers:
-    1. Ground state (basic meaning)
-    2. Single excited state (contextual meaning)
-    """
+    """Optimized quantum state representation"""
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
         
-        # Add layer norms
-        self.input_norm = nn.LayerNorm(dim)
-        self.output_norm = nn.LayerNorm(dim)
+        # Combine transforms into single operation
+        self.unified_transform = nn.Linear(dim, dim * 2)
+        nn.init.xavier_normal_(self.unified_transform.weight, gain=0.01)
+        nn.init.zeros_(self.unified_transform.bias)
         
-        # Even smaller initialization
-        self.ground_transform = nn.Linear(dim, dim)
-        nn.init.xavier_normal_(self.ground_transform.weight, gain=0.01)
-        nn.init.zeros_(self.ground_transform.bias)
+        # Single normalization layer
+        self.norm = nn.LayerNorm(dim * 2)
         
-        self.excite_transform = nn.Linear(dim, dim)
-        nn.init.xavier_normal_(self.excite_transform.weight, gain=0.01)
-        nn.init.zeros_(self.excite_transform.bias)
+        # Constant phase factor
+        self.register_buffer('phase_factor', torch.tensor([(1 + math.sqrt(5)) / 2 * 0.01]))
         
-        # Much smaller phase factor initialization
-        self.phase_factor = nn.Parameter(torch.randn(dim) * 0.001)
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Single transform operation
+        combined = self.unified_transform(x)
+        combined = self.norm(combined)
         
-        self.PHI = (1 + math.sqrt(5)) / 2
+        # Split into real and imaginary efficiently
+        real, imag = torch.chunk(combined, 2, dim=-1)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if len(x.shape) == 2:
-            x = x.unsqueeze(0)
+        # Fast normalization using fused operation
+        norm = torch.rsqrt(real.pow(2) + imag.pow(2) + 1e-8)
+        real = real * norm
+        imag = imag * norm
         
-        # Input normalization
-        x = self.input_norm(x)
-        x = x * 0.01  # Aggressive scaling
-        
-        # Process ground state with residual connection
-        ground_state = self.ground_transform(x) + x
-        
-        # Very bounded phase
-        phase = torch.tanh(self.phase_factor) * self.PHI * 0.01
-        excited_state = self.excite_transform(x) + x
-        
-        # Combine states with scaling
-        combined_real = ground_state + excited_state * torch.cos(phase)
-        combined_imag = excited_state * torch.sin(phase)
-        
-        # Normalize with larger epsilon
-        norm = torch.sqrt(combined_real.pow(2) + combined_imag.pow(2) + 1e-8)
-        combined_real = combined_real / norm
-        combined_imag = combined_imag / norm
-        
-        # Output normalization
-        combined_real = self.output_norm(combined_real)
-        combined_imag = self.output_norm(combined_imag)
-        
-        return combined_real, combined_imag
+        return real, imag
 
 class DynamicPhaseSpace(nn.Module):
     """Implements dynamic phase space representation"""
@@ -448,73 +433,62 @@ class TokenDistributionRegulator(nn.Module):
 
 # Update BasicQuantumAttention to use coherence
 class BasicQuantumAttention(nn.Module):
-    """Enhanced quantum attention with coherence preservation"""
+    """Optimized quantum attention"""
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
         self.scale = dim ** -0.5
         
-        # Phase-aware projections
-        self.q_phase = nn.Linear(dim, dim, bias=False)
-        self.k_phase = nn.Linear(dim, dim, bias=False)
-        self.v_phase = nn.Linear(dim, dim, bias=False)
+        # Separate projections for better dimension control
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
         
         # Initialize with small weights
-        for layer in [self.q_phase, self.k_phase, self.v_phase]:
-            nn.init.normal_(layer.weight, mean=0.0, std=0.02)
+        for layer in [self.q_proj, self.k_proj, self.v_proj]:
+            nn.init.normal_(layer.weight, std=0.02)
+            nn.init.zeros_(layer.bias)
         
-        self.q_norm = nn.LayerNorm(dim)
-        self.k_norm = nn.LayerNorm(dim)
-        self.v_norm = nn.LayerNorm(dim)
-        self.output_norm = nn.LayerNorm(dim)
-    
-    def compute_interference(self, q_real: torch.Tensor, q_imag: torch.Tensor, 
-                           k_real: torch.Tensor, k_imag: torch.Tensor) -> torch.Tensor:
-        """Compute interference pattern between query and key states"""
-        B, L, D = q_real.shape  # batch size, sequence length, dimension
+        # Single normalization layer
+        self.norm = nn.LayerNorm(dim)
         
-        # Extract phases
-        q_phase = torch.atan2(q_imag + 1e-8, q_real + 1e-8)
-        k_phase = torch.atan2(k_imag + 1e-8, k_real + 1e-8)
-        
-        # Reshape for attention computation
-        q_phase = q_phase.view(B, L, 1, D)  # [B, L, 1, D]
-        k_phase = k_phase.view(B, 1, L, D)  # [B, 1, L, D]
-        
-        # Phase difference
-        phase_diff = q_phase - k_phase  # [B, L, L, D]
-        
-        # Interference pattern (sum over dimension)
-        interference = torch.cos(phase_diff).sum(dim=-1) * self.scale  # [B, L, L]
-        coherence = torch.exp(-torch.abs(phase_diff).sum(dim=-1))  # [B, L, L]
-        
-        return interference * coherence
-    
     def forward(self, q_real: torch.Tensor, q_imag: torch.Tensor,
                 k_real: torch.Tensor, k_imag: torch.Tensor,
-                v_real: torch.Tensor, v_imag: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass with proper shape handling"""
-        # Project and normalize
-        q_real = self.q_norm(self.q_phase(q_real))
-        q_imag = self.q_norm(self.q_phase(q_imag))
-        k_real = self.k_norm(self.k_phase(k_real))
-        k_imag = self.k_norm(self.k_phase(k_imag))
-        v_real = self.v_norm(self.v_phase(v_real))
-        v_imag = self.v_norm(self.v_phase(v_imag))
+                v_real: torch.Tensor, v_imag: torch.Tensor,
+                pad_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         
-        # Compute attention through interference [B, L, L]
-        attn_weights = self.compute_interference(q_real, q_imag, k_real, k_imag)
+        # Get batch size and sequence length
+        B = q_real.size(0)
+        L = q_real.size(1)
+        
+        # Project each component separately
+        q_real = self.q_proj(q_real)
+        q_imag = self.q_proj(q_imag)
+        k_real = self.k_proj(k_real)
+        k_imag = self.k_proj(k_imag)
+        v_real = self.v_proj(v_real)
+        v_imag = self.v_proj(v_imag)
+        
+        # Compute attention scores
+        attn_real = torch.matmul(q_real, k_real.transpose(-2, -1)) * self.scale
+        attn_imag = torch.matmul(q_imag, k_imag.transpose(-2, -1)) * self.scale
+        
+        # Apply padding mask if provided
+        if pad_mask is not None:
+            pad_mask = pad_mask.unsqueeze(1)  # [B, 1, L]
+            attn_real = attn_real.masked_fill(pad_mask, float('-inf'))
+            attn_imag = attn_imag.masked_fill(pad_mask, float('-inf'))
         
         # Apply softmax
-        attn_weights = F.softmax(attn_weights / 0.1, dim=-1)  # [B, L, L]
+        attn_weights = torch.softmax(attn_real + attn_imag, dim=-1)
         
-        # Apply attention to values
-        out_real = torch.bmm(attn_weights, v_real)  # [B, L, D]
-        out_imag = torch.bmm(attn_weights, v_imag)  # [B, L, D]
+        # Compute output
+        out_real = torch.matmul(attn_weights, v_real)
+        out_imag = torch.matmul(attn_weights, v_imag)
         
-        # Final normalization
-        out_real = self.output_norm(out_real)
-        out_imag = self.output_norm(out_imag)
+        # Apply normalization
+        out_real = self.norm(out_real)
+        out_imag = self.norm(out_imag)
         
         return out_real, out_imag
 
@@ -524,72 +498,57 @@ def compute_enhanced_quantum_loss(
     targets: torch.Tensor,
     pad_token_id: int
 ) -> torch.Tensor:
-    """
-    Enhanced quantum loss function that prevents collapse to PAD token
-    with memory-efficient implementation
-    """
-    # Regular cross entropy with greater penalty for PAD predictions
+    """Optimized quantum loss computation with device flexibility"""
+    device = logits.device
+    
+    # Compute cross entropy efficiently
     ce_loss = F.cross_entropy(
         logits.view(-1, logits.size(-1)),
         targets.view(-1),
         ignore_index=pad_token_id,
-        reduction='none'
+        reduction='mean'
     )
     
-    # Get probabilities
-    with torch.no_grad():
-        probs = F.softmax(logits, dim=-1)
+    # Fast probability computation using native autocast
+    with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=True):
+        log_probs = F.log_softmax(logits, dim=-1)
+        probs = torch.exp(log_probs)
     
-    # Penalize PAD token predictions heavily
-    pad_probs = probs[:, :, pad_token_id]
+    # Efficient pad penalty
+    pad_probs = probs[..., pad_token_id]
     pad_penalty = torch.mean(pad_probs.pow(2)) * 10.0
     
-    # Encourage token diversity
-    with torch.no_grad():
-        token_dist = probs.mean(dim=[0, 1])
-        diversity_loss = -(token_dist * torch.log(token_dist + 1e-10)).sum()
+    # Fast token diversity using log probabilities
+    token_dist = probs.mean(dim=[0, 1])
+    diversity_loss = -(token_dist * log_probs.mean(dim=[0, 1])).sum()
     
-    # Compute coherence loss in small chunks to save memory
-    coherence_loss = 0.0
-    num_chunks = 0
-    chunk_size = 32  # Smaller chunks
+    # Optimized coherence calculation without complex numbers
     B, L, V = logits.shape
+    coherence_loss = torch.tensor(0.0, device=device)
     
-    with torch.no_grad():
-        for i in range(0, L, chunk_size):
-            j = min(i + chunk_size, L)
-            chunk = logits[:, i:j, :]
-            
-            # Process each batch item separately
-            for b in range(B):
-                # Get chunk for this batch
-                batch_chunk = chunk[b:b+1]  # Keep dimension
-                
-                # Compute phase angles for this small chunk
-                chunk_real = batch_chunk.unsqueeze(-2)  # [1, chunk_size, 1, V]
-                chunk_imag = batch_chunk.unsqueeze(-1)  # [1, chunk_size, V, 1]
-                
-                # Compute phase difference
-                phase_diff = torch.atan2(chunk_real, chunk_imag + 1e-8)
-                
-                # Compute coherence for this chunk
-                chunk_coherence = -torch.mean(torch.cos(phase_diff))
-                coherence_loss += chunk_coherence.item()
-                num_chunks += 1
-                
-                # Clear unnecessary tensors
-                del phase_diff, chunk_coherence
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    if L > 1:  # Only compute coherence if sequence length > 1
+        # Ensure the split is even
+        V_half = V // 2
+        real = logits[..., :V_half]
+        imag = logits[..., V_half:V_half*2]
+        
+        # Make sure real and imag have the same size
+        min_size = min(real.size(-1), imag.size(-1))
+        real = real[..., :min_size]
+        imag = imag[..., :min_size]
+        
+        # Compute phases using real and imaginary parts
+        phases = torch.atan2(imag + 1e-8, real + 1e-8)
+        mean_phase = phases.mean(dim=1, keepdim=True)
+        phase_diffs = (phases - mean_phase).abs().mean()
+        coherence_loss = -torch.cos(phase_diffs)
     
-    # Average coherence loss
-    coherence_loss = coherence_loss / max(num_chunks, 1)
-    
-    # Combine losses with weights
+    # Combine losses with adjusted weights
     total_loss = (
-        ce_loss.mean() +
-        pad_penalty +  # Heavy penalty for PAD collapse
-        0.2 * coherence_loss +  # Maintain quantum coherence
-        0.1 * (1.0 - torch.clamp(diversity_loss, 0.0, 0.5))  # Encourage diversity
+        ce_loss +
+        pad_penalty +
+        0.1 * coherence_loss +
+        0.05 * (1.0 - torch.clamp(diversity_loss, 0.0, 0.5))
     )
     
     return total_loss
