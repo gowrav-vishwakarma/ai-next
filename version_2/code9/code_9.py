@@ -351,8 +351,9 @@ class QuantumLLM(nn.Module):
         try:
             # Get quantum embeddings with value checking
             real_embed, imag_embed = self.embedding(x)
-            print(f"Embedding ranges - Real: {real_embed.min():.4f} to {real_embed.max():.4f}, "
-                  f"Imag: {imag_embed.min():.4f} to {imag_embed.max():.4f}")
+            if DEBUG_MODE:  
+                print(f"Embedding ranges - Real: {real_embed.min():.4f} to {real_embed.max():.4f}, "
+                      f"Imag: {imag_embed.min():.4f} to {imag_embed.max():.4f}")
             
             # Scale down embeddings
             real_embed = real_embed * 0.1
@@ -387,8 +388,9 @@ class QuantumLLM(nn.Module):
                 real = torch.clamp(real, min=-1, max=1)  # Tighter clamping
                 imag = torch.clamp(real, min=-1, max=1)  # Tighter clamping
                 
-                print(f"Layer {i} outputs - Real: {real.min():.4f} to {real.max():.4f}, "
-                      f"Imag: {imag.min():.4f} to {imag.max():.4f}")
+                if DEBUG_MODE:
+                    print(f"Layer {i} outputs - Real: {real.min():.4f} to {real.max():.4f}, "
+                          f"Imag: {imag.min():.4f} to {imag.max():.4f}")
             
             # Combine for output with scaling
             combined = torch.cat([real, imag], dim=-1)
@@ -690,13 +692,12 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
         weight_decay=0.01  # Reduced weight decay
     )
 
-    # Add learning rate scheduler for stability
+    # Initialize scheduler without verbose parameter
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='min', 
         factor=0.5,
-        patience=2,
-        verbose=True
+        patience=2
     )
 
     # Device-specific context manager for mixed precision
@@ -721,7 +722,8 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
         try:
             with get_autocast_context():
                 # Debug input values
-                print(f"Input range: {input_ids.min().item():.4f} to {input_ids.max().item():.4f}")
+                if DEBUG_MODE:
+                    print(f"Input range: {input_ids.min().item():.4f} to {input_ids.max().item():.4f}")
                 
                 # Forward pass with gradient scaling and value clamping
                 with torch.autograd.detect_anomaly():  # Enable anomaly detection
@@ -732,7 +734,8 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
                     logits = logits / grad_scale
                     
                     # Debug intermediate values
-                    print(f"Pre-scaled logits range: {logits.min().item():.4f} to {logits.max().item():.4f}")
+                    if DEBUG_MODE:  
+                        print(f"Pre-scaled logits range: {logits.min().item():.4f} to {logits.max().item():.4f}")
                 
                 # Check for NaN values early
                 if torch.isnan(logits).any():
@@ -740,12 +743,14 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
                     print("Model state:", {name: param.mean().item() for name, param in model.named_parameters()})
                     return None
                 
-                print(f"Logits shape: {logits.shape}")
-                print(f"Logits min/max: {logits.min().item():.4f}/{logits.max().item():.4f}")
+                if DEBUG_MODE:
+                    print(f"Logits shape: {logits.shape}")
+                    print(f"Logits min/max: {logits.min().item():.4f}/{logits.max().item():.4f}")
 
                 target_ids = torch.roll(input_ids.clone(), shifts=-1, dims=-1)
-                print(f"Target shape: {target_ids.shape}")
-                print(f"Target range: {target_ids.min().item():.4f} to {target_ids.max().item():.4f}")
+                if DEBUG_MODE:  
+                    print(f"Target shape: {target_ids.shape}")
+                    print(f"Target range: {target_ids.min().item():.4f} to {target_ids.max().item():.4f}")
 
                 # Add EOS tokens
                 pad_mask = (input_ids == model.tokenizer.vocab[model.tokenizer.PAD_token])
@@ -772,7 +777,8 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
                     print(f"  Stability term: {stability_term.item()}")
                     return None
 
-                print(f"Loss: {loss.item():.4f}")
+                if DEBUG_MODE:
+                    print(f"Loss: {loss.item():.4f}")
                 return loss
 
         except Exception as e:
@@ -815,12 +821,22 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
         epoch_loss = 0.0
         valid_batches = 0
         
-        for chunk_idx in tqdm(range(num_chunks), desc=f"Processing chunks"):
+        # Create progress bar for chunks
+        chunk_pbar = tqdm(range(num_chunks), desc=f"Processing chunks")
+        
+        for chunk_idx in chunk_pbar:
             chunk_start = chunk_idx * chunk_size
             chunk_end = min((chunk_idx + 1) * chunk_size, len(dataset))
             chunk_data = dataset[chunk_start:chunk_end]
             
-            for i in range(0, len(chunk_data), batch_size):
+            # Create progress bar for batches within chunk
+            batch_pbar = tqdm(
+                range(0, len(chunk_data), batch_size),
+                desc=f"Processing batches",
+                leave=False
+            )
+            
+            for i in batch_pbar:
                 try:
                     batch_end = min(i + batch_size, len(chunk_data))
                     input_ids = chunk_data[i:batch_end].to(device)
@@ -834,7 +850,8 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
                             if torch.isfinite(loss):
                                 epoch_loss += loss.item() * gradient_accumulation_steps
                                 valid_batches += 1
-                                print(f"Valid batch processed - Running average loss: {epoch_loss/valid_batches:.4f}")
+                                # Update batch progress bar with current loss
+                                batch_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
                     
                     # Gradient accumulation step
                     if (i // batch_size + 1) % gradient_accumulation_steps == 0:
@@ -857,13 +874,23 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
                     continue
                 
                 # Clear memory with device
-                clear_memory(device)
-        
+                if i % (batch_size * 10) == 0:  # Only clear every 10 batches
+                    clear_memory(device)
+            
+            # Update chunk progress bar with average loss
+            if valid_batches > 0:
+                chunk_pbar.set_postfix({'avg_loss': f'{epoch_loss/valid_batches:.4f}'})
+
         # Update learning rate based on epoch loss
         if valid_batches > 0:
             avg_loss = epoch_loss / valid_batches
             print(f"\nEpoch {epoch+1} - Average Loss: {avg_loss:.4f}")
-            scheduler.step(avg_loss)
+            
+            # For ReduceLROnPlateau, we still need to pass the loss value
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(avg_loss)
+            else:
+                scheduler.step()  # For other schedulers, just call step()
             
             # Save checkpoint
             save_checkpoint(model, optimizer, epoch+1, avg_loss, args)
@@ -997,6 +1024,9 @@ def analyze_epoch_distribution(model: QuantumLLM, token_dist: Counter, epoch: in
 
 def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, temperature: float = 0.7) -> str:
     """Generate text using the quantum language model with live updating output"""
+    # Get device
+    device = next(model.parameters()).device  # Get device from model
+    
     # Ensure model is in eval mode
     model.eval()
     
