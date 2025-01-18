@@ -1208,43 +1208,50 @@ def verify_checkpoint(checkpoint_path: str) -> bool:
             return False
     return True
 
-def main(args):
-    # Add argument parsing at the start of main
-    parser = argparse.ArgumentParser(description='Train quantum language model')
-    parser.add_argument('--mode', type=str, default='train', 
-                      choices=['train', 'eval', 'generate'],
-                      help='Mode to run in (train, eval, or generate)')
-    parser.add_argument('--max_samples', type=int, default=1000,
-                      help='Maximum number of samples to process')
-    parser.add_argument('--epochs', type=int, default=3,
-                      help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=32,
-                      help='Batch size for training')
-    parser.add_argument('--chunk_size', type=int, default=512,
-                      help='Chunk size for processing')
-    parser.add_argument('--model_dim', type=int, default=64,
-                      help='Model dimension')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
-                      help='Directory for saving checkpoints')
-    
-    # Add generation-specific arguments
-    parser.add_argument('--prompt', type=str, default=None,
-                      help='Text prompt for generation')
-    parser.add_argument('--max_length', type=int, default=100,
-                      help='Maximum length of generated text')
-    parser.add_argument('--temperature', type=float, default=0.7,
-                      help='Sampling temperature')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                      help='Specific checkpoint to load')
-    parser.add_argument('--nucleus_threshold', type=float, default=0.9,
-                      help='Nucleus sampling threshold (0.1-0.99)')
-    
-    args = parser.parse_args()
-    
+def main(args=None):
+    """
+    Main function that can accept either command line args or a Namespace object
+    """
+    if args is None:
+        # Only parse command line arguments if no args provided
+        parser = argparse.ArgumentParser(description='Train quantum language model')
+        parser.add_argument('--mode', type=str, default='train', 
+                          choices=['train', 'eval', 'generate'],
+                          help='Mode to run in (train, eval, or generate)')
+        parser.add_argument('--max_samples', type=int, default=1000,
+                          help='Maximum number of samples to process')
+        parser.add_argument('--epochs', type=int, default=3,
+                          help='Number of training epochs')
+        parser.add_argument('--batch_size', type=int, default=32,
+                          help='Batch size for training')
+        parser.add_argument('--chunk_size', type=int, default=512,
+                          help='Chunk size for processing')
+        parser.add_argument('--model_dim', type=int, default=64,
+                          help='Model dimension')
+        parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
+                          help='Directory for saving checkpoints')
+        parser.add_argument('--prompt', type=str, default=None,
+                          help='Text prompt for generation')
+        parser.add_argument('--max_length', type=int, default=100,
+                          help='Maximum length of generated text')
+        parser.add_argument('--temperature', type=float, default=0.7,
+                          help='Sampling temperature')
+        parser.add_argument('--checkpoint', type=str, default=None,
+                          help='Specific checkpoint to load')
+        parser.add_argument('--nucleus_threshold', type=float, default=0.9,
+                          help='Nucleus sampling threshold (0.1-0.99)')
+        
+        args = parser.parse_args()
+
     # Get device first
     device = get_device()
     print(f"Using device: {device}")
     
+    # Print the args being used
+    print("\nUsing arguments:")
+    for arg, value in vars(args).items():
+        print(f"{arg}: {value}")
+
     if args.mode == 'train':
         # Load dataset with quantum tokenizer
         dataset, tokenizer = load_quantum_wikitext(max_samples=args.max_samples)
@@ -1309,24 +1316,4 @@ def main(args):
             print(f"{metric}: {value:.4f}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Quantum-Inspired Language Model")
-    parser.add_argument('--mode', type=str, choices=['train', 'generate'], required=True,
-                      help="Mode: train or generate")
-    parser.add_argument('--prompt', type=str, help="Prompt for text generation")
-    parser.add_argument('--max_length', type=int, default=100,
-                      help="Maximum length of generated text")
-    parser.add_argument('--temperature', type=float, default=0.7,
-                      help="Temperature for text generation")
-    parser.add_argument('--max_samples', type=int, default=100,
-                      help="Maximum number of samples to load from dataset")
-    parser.add_argument('--epochs', type=int, default=3,
-                      help="Number of training epochs")
-    parser.add_argument('--batch_size', type=int, default=32,
-                      help="Batch size for training")
-    parser.add_argument('--checkpoint', type=str,
-                      help="Path to checkpoint file for loading")
-    parser.add_argument('--checkpoint_dir', type=str, default="checkpoints",
-                      help="Directory to save checkpoints")
-
-    args = parser.parse_args()
-    main(args)
+    main()  # Will parse command line args when run directly
