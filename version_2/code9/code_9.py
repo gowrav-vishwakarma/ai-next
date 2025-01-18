@@ -205,116 +205,175 @@ class DataPrefetcher:
         return data
 
 class EnhancedDynamicPhaseSpace(nn.Module):
-    """Enhanced dynamic phase space with quantum collapse prevention"""
-    def __init__(self, dim: int):
+    """Dynamic phase space with layered representation and interference patterns"""
+    def __init__(self, dim: int, num_layers: int = 3):
         super().__init__()
         self.dim = dim
-        self.quantum_state = SimpleQuantumState(dim)  # Use existing quantum state
+        self.num_layers = num_layers
+        self.PHI = (1 + math.sqrt(5)) / 2  # Golden ratio
         
-        # Anti-collapse mechanism
+        # Phase spaces for different semantic layers (semantic, context, emotion)
+        self.layer_phases = nn.ParameterList([
+            nn.Parameter(torch.zeros(dim)) for _ in range(num_layers)
+        ])
+        
+        # Quantum interference mixers
+        self.interference_weights = nn.ParameterList([
+            nn.Parameter(torch.randn(dim) * 0.02) for _ in range(num_layers)
+        ])
+        
+        # Layer normalization for stability
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(dim, eps=1e-8) for _ in range(num_layers)
+        ])
+        
+        # Energy levels for collapse prevention
         self.energy_levels = nn.Parameter(torch.linspace(0, 1, dim))
         self.excitation_factor = nn.Parameter(torch.ones(1) * 0.1)
     
     def forward(self, x: torch.Tensor, pad_token_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Get base quantum state
-        real, imag = self.quantum_state(x)
+        real_parts = []
+        imag_parts = []
+        
+        for layer_idx in range(self.num_layers):
+            # Generate dynamic phase angles using golden ratio
+            phase_angles = torch.tanh(self.layer_phases[layer_idx]) * math.pi * self.PHI
+            
+            # Create quantum state components
+            real = x * torch.cos(phase_angles)
+            imag = x * torch.sin(phase_angles)
+            
+            # Normalize
+            real = self.layer_norms[layer_idx](real)
+            imag = self.layer_norms[layer_idx](imag)
+            
+            # Apply interference
+            interference = torch.tanh(self.interference_weights[layer_idx])
+            real = real * interference
+            imag = imag * interference
+            
+            real_parts.append(real)
+            imag_parts.append(imag)
+        
+        # Combine through quantum interference
+        final_real = torch.zeros_like(x)
+        final_imag = torch.zeros_like(x)
+        
+        for i in range(self.num_layers):
+            angle = 2 * math.pi * i / self.num_layers
+            phase_factor_real = torch.cos(torch.tensor(angle))
+            phase_factor_imag = torch.sin(torch.tensor(angle))
+            
+            final_real += real_parts[i] * phase_factor_real - imag_parts[i] * phase_factor_imag
+            final_imag += real_parts[i] * phase_factor_imag + imag_parts[i] * phase_factor_real
         
         # Add collapse prevention
-        amplitude = torch.sqrt(real.pow(2) + imag.pow(2) + 1e-8)
+        amplitude = torch.sqrt(final_real.pow(2) + final_imag.pow(2) + 1e-8)
         is_collapsing = (amplitude < 0.1).float()
         
         excitation = torch.exp(self.energy_levels) * self.excitation_factor
-        real = real + is_collapsing * excitation.unsqueeze(0).unsqueeze(0)
-        imag = imag + is_collapsing * excitation.unsqueeze(0).unsqueeze(0)
+        final_real = final_real + is_collapsing * excitation.unsqueeze(0).unsqueeze(0)
+        final_imag = final_imag + is_collapsing * excitation.unsqueeze(0).unsqueeze(0)
         
-        # Renormalize
-        norm = torch.sqrt(real.pow(2) + imag.pow(2) + 1e-8)
-        real = real / norm
-        imag = imag / norm
+        # Normalize
+        norm = torch.sqrt(final_real.pow(2) + final_imag.pow(2) + 1e-8)
+        final_real = final_real / norm
+        final_imag = final_imag / norm
         
-        return real, imag
+        return final_real, final_imag
 
 class QuantumStatePreservingAttention(BasicQuantumAttention):
-    """Enhanced quantum attention mechanism that preserves quantum coherence"""
+    """Interference-based quantum attention with phase coherence"""
     def __init__(self, dim: int):
         super().__init__(dim)
         
-        # Additional quantum state preservation
+        # Phase preservation and coherence
         self.phase_preservation = nn.Parameter(torch.ones(dim) * 0.1)
+        self.coherence_factor = nn.Parameter(torch.ones(1) * 0.1)
         
-        # Add layer normalization for stability
+        # Layer normalization for stability
         self.q_norm = nn.LayerNorm(dim)
         self.k_norm = nn.LayerNorm(dim)
         self.v_norm = nn.LayerNorm(dim)
         
-        # Fix: Convert scale to tensor before assignment
-        self.register_buffer('scale', torch.tensor(dim).pow(-0.5))
+        # Attention weights - match input dimension
+        self.W_attn = nn.Parameter(torch.randn(dim, dim) * 0.02)
         
+        self.register_buffer('scale', torch.tensor(dim).pow(-0.5))
+    
+    def compute_coherence(self, phase_diffs: torch.Tensor) -> torch.Tensor:
+        """Compute quantum coherence measure"""
+        return torch.mean(torch.cos(phase_diffs), dim=(-1, -2))
+    
     def forward(self, q_real: torch.Tensor, q_imag: torch.Tensor,
                 k_real: torch.Tensor, k_imag: torch.Tensor,
                 v_real: torch.Tensor, v_imag: torch.Tensor,
                 pad_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        
         try:
+            # Get input shapes
+            B, L, D = q_real.shape  # Batch, Length, Dimension
+            
             # Apply layer normalization
             q_real, q_imag = self.q_norm(q_real), self.q_norm(q_imag)
             k_real, k_imag = self.k_norm(k_real), self.k_norm(k_imag)
             v_real, v_imag = self.v_norm(v_real), self.v_norm(v_imag)
             
-            # Scale inputs
-            q_real, q_imag = q_real * self.scale, q_imag * self.scale
-            k_real, k_imag = k_real * self.scale, k_imag * self.scale
+            # Extract phases
+            q_phase = torch.atan2(q_imag + 1e-8, q_real + 1e-8)  # [B, L, D]
+            k_phase = torch.atan2(k_imag + 1e-8, k_real + 1e-8)  # [B, L, D]
             
-            # Compute attention scores with stability measures
-            scores_real = torch.clamp(
-                torch.matmul(q_real, k_real.transpose(-2, -1)) - 
-                torch.matmul(q_imag, k_imag.transpose(-2, -1)),
-                min=-10, max=10
-            )
+            # Compute phase differences for interference - fix dimensions
+            # Reshape to enable broadcasting
+            q_phase_expanded = q_phase.unsqueeze(2)  # [B, L, 1, D]
+            k_phase_expanded = k_phase.unsqueeze(1)  # [B, 1, L, D]
+            phase_diffs = q_phase_expanded - k_phase_expanded  # [B, L, L, D]
             
-            scores_imag = torch.clamp(
-                torch.matmul(q_real, k_imag.transpose(-2, -1)) + 
-                torch.matmul(q_imag, k_real.transpose(-2, -1)),
-                min=-10, max=10
-            )
+            # Compute interference pattern
+            interference = torch.cos(phase_diffs)  # [B, L, L, D]
+            
+            # Apply attention weights and scaling
+            # Reshape interference to match weight matrix
+            interference_flat = interference.view(B * L * L, D)  # [B*L*L, D]
+            weighted = torch.matmul(interference_flat, self.W_attn)  # [B*L*L, D]
+            attn_scores = weighted.view(B, L, L, D)  # [B, L, L, D]
+            
+            # Average over dimension D to get attention scores
+            attn_scores = torch.mean(attn_scores, dim=-1) * self.scale  # [B, L, L]
             
             # Apply padding mask if provided
             if pad_mask is not None:
-                scores_real = scores_real.masked_fill(pad_mask.unsqueeze(1), float('-inf'))
-                scores_imag = scores_imag.masked_fill(pad_mask.unsqueeze(1), 0.0)
+                # Ensure pad_mask has correct shape [B, L]
+                pad_mask = pad_mask.view(B, L)
+                attn_scores = attn_scores.masked_fill(
+                    pad_mask.unsqueeze(1).expand(-1, L, -1),
+                    float('-inf')
+                )
             
-            # Compute attention weights with numerical stability
-            weights = F.softmax(scores_real, dim=-1)
-            weights = torch.clamp(weights, min=1e-6, max=1.0)
+            # Compute attention weights with stability
+            attn_weights = F.softmax(attn_scores, dim=-1)  # [B, L, L]
+            attn_weights = torch.clamp(attn_weights, min=1e-6, max=1.0)
             
             # Apply attention
-            out_real = torch.matmul(weights, v_real)
-            out_imag = torch.matmul(weights, v_imag)
+            out_real = torch.matmul(attn_weights, v_real)  # [B, L, D]
+            out_imag = torch.matmul(attn_weights, v_imag)  # [B, L, D]
             
-            # Add phase preservation with scaling
+            # Compute and apply coherence
+            coherence = self.compute_coherence(phase_diffs)  # [B, L]
+            coherence_factor = torch.sigmoid(self.coherence_factor) * coherence.unsqueeze(-1)
+            
+            # Apply phase preservation with coherence
             phase = torch.atan2(out_imag + 1e-8, out_real + 1e-8)
-            preservation = torch.sigmoid(self.phase_preservation) * 0.1  # Scale down preservation
+            preservation = torch.sigmoid(self.phase_preservation) * coherence_factor
             
-            # Apply phase preservation with clamping
-            preserved_real = torch.clamp(
-                out_real * torch.cos(phase * preservation.unsqueeze(0).unsqueeze(0)),
-                min=-5, max=5
-            )
-            preserved_imag = torch.clamp(
-                out_imag * torch.sin(phase * preservation.unsqueeze(0).unsqueeze(0)),
-                min=-5, max=5
-            )
-            
-            # Add residual skip connection
-            preserved_real = preserved_real + q_real * 0.1
-            preserved_imag = preserved_imag + q_imag * 0.1
+            preserved_real = out_real * torch.cos(phase * preservation)
+            preserved_imag = out_imag * torch.sin(phase * preservation)
             
             return preserved_real, preserved_imag
             
         except Exception as e:
             print(f"Error in attention mechanism: {str(e)}")
             traceback.print_exc()
-            # Return zero tensors as fallback
+            # Return zero tensors with correct shape
             return torch.zeros_like(q_real), torch.zeros_like(q_imag)
 
 class QuantumLLM(nn.Module):
@@ -426,8 +485,31 @@ class QuantumLLM(nn.Module):
         self.output = self.output.to(device)
         return self
 
+def is_colab():
+    """Check if code is running in Google Colab"""
+    try:
+        import google.colab
+        return True
+    except ImportError:
+        return False
+
+def get_project_root():
+    """Get project root directory for both Colab and local environments"""
+    if is_colab():
+        return '/content/code9'
+    else:
+        try:
+            return os.path.dirname(os.path.abspath(__file__))
+        except NameError:  # If __file__ is not defined
+            return os.path.abspath('code9')
+
 def load_quantum_wikitext(max_samples: Optional[int] = None):
     """Load and preprocess Wikitext with quantum tokenizer"""
+    # Get project root and create directories
+    root_dir = get_project_root()
+    data_dir = os.path.join(root_dir, 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    
     # Load raw dataset
     dataset = load_dataset("wikitext", "wikitext-103-v1", split='train')
     
@@ -438,8 +520,7 @@ def load_quantum_wikitext(max_samples: Optional[int] = None):
     texts = [example['text'] for example in dataset]
     
     # Save dataset to file
-    script_name = os.path.basename(__file__)  # Gets the current file name
-    dataset_file = script_name.rsplit('.', 1)[0] + "_dataset.txt"  # Creates filename_dataset.txt
+    dataset_file = os.path.join(data_dir, 'wikitext_dataset.txt')
     
     print(f"Saving dataset to {dataset_file}...")
     with open(dataset_file, 'w', encoding='utf-8') as f:
@@ -475,10 +556,10 @@ def load_quantum_wikitext(max_samples: Optional[int] = None):
     
     return input_ids, tokenizer
 
-def save_checkpoint(model: QuantumLLM, optimizer, epoch: int, loss: float, args, path: str = "checkpoints"):
+def save_checkpoint(model: QuantumLLM, optimizer, epoch: int, loss: float, args, path: str = None):
     """Save model checkpoint"""
-    import os
-    import pickle  # Add import for tokenizer serialization
+    if path is None:
+        path = os.path.join(get_project_root(), 'checkpoints')
     
     # Create checkpoint directory if it doesn't exist
     os.makedirs(path, exist_ok=True)
@@ -645,176 +726,82 @@ def compute_quantum_loss(model: QuantumLLM, logits: torch.Tensor, targets: torch
         pad_token_id=model.tokenizer.vocab[model.tokenizer.PAD_token]
     )
 
+def process_batch(input_ids, model, optimizer, scheduler=None):
+    try:
+        # Zero gradients
+        optimizer.zero_grad(set_to_none=True)
+        
+        # Forward pass
+        logits = model(input_ids)
+        
+        # Compute loss
+        target_ids = torch.roll(input_ids, shifts=-1, dims=-1)
+        loss = model.compute_loss(logits, target_ids)
+        
+        # Backward pass with retain_graph=True
+        loss.backward(retain_graph=True)
+        
+        # Clip gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        # Step optimizer
+        optimizer.step()
+        
+        # Step scheduler if provided
+        if scheduler is not None:
+            scheduler.step()
+        
+        return loss
+        
+    except Exception as e:
+        print(f"Error in batch processing: {str(e)}")
+        traceback.print_exc()
+        return None
+
 def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespace) -> Tuple[nn.Module, Dict]:
     # Get device and configuration
     device = get_device()
     print(f"Training on device: {device}")
-    print(f"Dataset size: {len(dataset)}")
     
     # Get device-specific configuration
     config = get_device_config(device, args.batch_size)
+    config['learning_rate'] = 1e-3  # Increase from 1e-5 to 1e-3
+    config['gradient_clip'] = 1.0   # Increase from 0.5 to 1.0
+    
+    # Initialize training parameters
+    batch_size = config['batch_size']
+    chunk_size = getattr(args, 'chunk_size', config['chunk_size'])
+    
+    # Calculate number of chunks
+    num_chunks = (len(dataset) + chunk_size - 1) // chunk_size
+    
+    print(f"Dataset size: {len(dataset)}")
+    print(f"Using batch_size: {batch_size}, chunk_size: {chunk_size}")
+    print(f"Number of chunks: {num_chunks}")
+    
+    # Initialize optimizer with better settings
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config['learning_rate'],
+        betas=(0.9, 0.98),
+        eps=1e-6,
+        weight_decay=0.01
+    )
+    
+    # Create scheduler
+    num_training_steps = args.epochs * (len(dataset) // batch_size)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=config['learning_rate'],
+        total_steps=num_training_steps,
+        pct_start=0.1,
+        anneal_strategy='cos'
+    )
     
     # Move model to device
     model = ensure_model_on_device(model, device)
     
-    # Initialize training parameters
-    batch_size = config['batch_size']
-    gradient_accumulation_steps = config['grad_accum_steps']
-    chunk_size = getattr(args, 'chunk_size', config['chunk_size'])
-    use_amp = config['use_amp']
-    gradient_clip = config['gradient_clip']
-    learning_rate = config['learning_rate']
-    
-    # Add gradient scaling for numerical stability
-    grad_scale = 1.0 if device == 'mps' else 4.0  # Higher scaling for MPS
-    
-    print(f"Using configuration for {device}:")
-    print(f"  batch_size: {batch_size}")
-    print(f"  gradient_accumulation_steps: {gradient_accumulation_steps}")
-    print(f"  chunk_size: {chunk_size}")
-    print(f"  use_amp: {use_amp}")
-    print(f"  gradient_clip: {gradient_clip}")
-    print(f"  learning_rate: {learning_rate}")
-    print(f"  gradient_scale: {grad_scale}")
-
-    # Calculate number of chunks
-    num_chunks = (len(dataset) + chunk_size - 1) // chunk_size
-
-    print(f"Using batch_size: {batch_size}, chunk_size: {chunk_size}, gradient_clip: {gradient_clip}")
-    print(f"Number of chunks: {num_chunks}")
-
-    # Initialize optimizer with more stable settings
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        betas=(0.9, 0.999),
-        eps=config['eps'],  # Higher eps for MPS
-        weight_decay=0.01  # Reduced weight decay
-    )
-
-    # Initialize scheduler without verbose parameter
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5,
-        patience=2
-    )
-
-    # Device-specific context manager for mixed precision
-    def get_autocast_context():
-        if device == "cuda" and use_amp:
-            return torch.cuda.amp.autocast()
-        return nullcontext()
-
-    def safe_backward(loss, optimizer, scaler=None):
-        try:
-            if scaler is not None:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            return True
-        except RuntimeError as e:
-            print(f"Error in backward pass: {str(e)}")
-            optimizer.zero_grad(set_to_none=True)
-            return False
-
-    def process_batch(input_ids, model, optimizer, scaler=None):
-        try:
-            with get_autocast_context():
-                # Debug input values
-                if DEBUG_MODE:
-                    print(f"Input range: {input_ids.min().item():.4f} to {input_ids.max().item():.4f}")
-                
-                # Forward pass with gradient scaling and value clamping
-                with torch.autograd.detect_anomaly():  # Enable anomaly detection
-                    logits = model(input_ids)
-                    
-                    # Add value clamping for stability
-                    logits = torch.clamp(logits, min=-100, max=100)
-                    logits = logits / grad_scale
-                    
-                    # Debug intermediate values
-                    if DEBUG_MODE:  
-                        print(f"Pre-scaled logits range: {logits.min().item():.4f} to {logits.max().item():.4f}")
-                
-                # Check for NaN values early
-                if torch.isnan(logits).any():
-                    print("Warning: NaN values detected in logits")
-                    print("Model state:", {name: param.mean().item() for name, param in model.named_parameters()})
-                    return None
-                
-                if DEBUG_MODE:
-                    print(f"Logits shape: {logits.shape}")
-                    print(f"Logits min/max: {logits.min().item():.4f}/{logits.max().item():.4f}")
-
-                target_ids = torch.roll(input_ids.clone(), shifts=-1, dims=-1)
-                if DEBUG_MODE:  
-                    print(f"Target shape: {target_ids.shape}")
-                    print(f"Target range: {target_ids.min().item():.4f} to {target_ids.max().item():.4f}")
-
-                # Add EOS tokens
-                pad_mask = (input_ids == model.tokenizer.vocab[model.tokenizer.PAD_token])
-                seq_lengths = torch.argmax(pad_mask.float(), dim=1)
-                for idx, length in enumerate(seq_lengths):
-                    if length == 0:
-                        length = input_ids.size(1) - 1
-                    target_ids[idx, length] = model.tokenizer.vocab[model.tokenizer.EOS_token]
-
-                # Compute loss with gradient clipping and stability measures
-                loss = compute_quantum_loss(model, logits, target_ids)
-                
-                # Add stability term to loss
-                stability_term = 0.01 * (logits ** 2).mean()  # L2 regularization
-                loss = loss + stability_term
-                
-                # Scale loss for stability
-                loss = loss / gradient_accumulation_steps
-                
-                if not torch.isfinite(loss):
-                    print(f"Warning: Non-finite loss detected: {loss.item()}")
-                    print("Loss components:")
-                    print(f"  Main loss: {compute_quantum_loss(model, logits, target_ids).item()}")
-                    print(f"  Stability term: {stability_term.item()}")
-                    return None
-
-                if DEBUG_MODE:
-                    print(f"Loss: {loss.item():.4f}")
-                return loss
-
-        except Exception as e:
-            print(f"Error in batch processing: {str(e)}")
-            traceback.print_exc()
-            return None
-
-    # Initialize training with stability measures
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Set smaller initial learning rate for stability
-    initial_lr = learning_rate * 0.1
-    warmup_steps = 100
-    
-    # Initialize optimizer with more conservative settings
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=initial_lr,
-        betas=(0.9, 0.98),  # More conservative beta2
-        eps=1e-6 if device == 'mps' else 1e-8,  # Increased epsilon
-        weight_decay=0.001  # Reduced weight decay
-    )
-
-    # Add learning rate scheduler with warmup
-    def lr_lambda(step):
-        if step < warmup_steps:
-            return float(step) / float(max(1, warmup_steps))
-        return 1.0
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    # Initialize AMP scaler for CUDA
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
-    print(f"Using AMP: {use_amp}, Scaler: {'enabled' if scaler else 'disabled'}")  # Debug info
-
+    # Training loop
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         model.train()
@@ -829,7 +816,7 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
             chunk_end = min((chunk_idx + 1) * chunk_size, len(dataset))
             chunk_data = dataset[chunk_start:chunk_end]
             
-            # Create progress bar for batches within chunk
+            # Process batches within chunk
             batch_pbar = tqdm(
                 range(0, len(chunk_data), batch_size),
                 desc=f"Processing batches",
@@ -837,66 +824,36 @@ def train_model(model: nn.Module, dataset: torch.Tensor, args: argparse.Namespac
             )
             
             for i in batch_pbar:
-                try:
-                    batch_end = min(i + batch_size, len(chunk_data))
-                    input_ids = chunk_data[i:batch_end].to(device)
-                    
-                    # Process batch with error handling
-                    loss = process_batch(input_ids, model, optimizer, scaler)
-                    
-                    if loss is not None:
-                        # Backward pass with error handling
-                        if safe_backward(loss, optimizer, scaler):
-                            if torch.isfinite(loss):
-                                epoch_loss += loss.item() * gradient_accumulation_steps
-                                valid_batches += 1
-                                # Update batch progress bar with current loss
-                                batch_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-                    
-                    # Gradient accumulation step
-                    if (i // batch_size + 1) % gradient_accumulation_steps == 0:
-                        if scaler is not None:
-                            scaler.unscale_(optimizer)
-                        
-                        # Clip gradients
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip)
-                        
-                        if scaler is not None:
-                            scaler.step(optimizer)
-                            scaler.update()
-                        else:
-                            optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-                    
-                except Exception as e:
-                    print(f"\nError in batch processing: {str(e)}")
-                    traceback.print_exc()
-                    continue
+                batch_end = min(i + batch_size, len(chunk_data))
+                input_ids = chunk_data[i:batch_end].to(device)
                 
-                # Clear memory with device
-                if i % (batch_size * 10) == 0:  # Only clear every 10 batches
+                # Process batch with scheduler
+                loss = process_batch(input_ids, model, optimizer, scheduler)
+                
+                if loss is not None:
+                    epoch_loss += loss.item()
+                    valid_batches += 1
+                    batch_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                
+                # Clear memory periodically
+                if i % (batch_size * 10) == 0:
                     clear_memory(device)
             
-            # Update chunk progress bar with average loss
+            # Update chunk progress
             if valid_batches > 0:
-                chunk_pbar.set_postfix({'avg_loss': f'{epoch_loss/valid_batches:.4f}'})
-
-        # Update learning rate based on epoch loss
+                avg_loss = epoch_loss / valid_batches
+                chunk_pbar.set_postfix({'avg_loss': f'{avg_loss:.4f}'})
+        
+        # Compute epoch average loss
         if valid_batches > 0:
             avg_loss = epoch_loss / valid_batches
             print(f"\nEpoch {epoch+1} - Average Loss: {avg_loss:.4f}")
-            
-            # For ReduceLROnPlateau, we still need to pass the loss value
-            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(avg_loss)
-            else:
-                scheduler.step()  # For other schedulers, just call step()
             
             # Save checkpoint
             save_checkpoint(model, optimizer, epoch+1, avg_loss, args)
         else:
             print(f"\nEpoch {epoch+1} - No valid batches processed")
-
+    
     return model, {'final_loss': epoch_loss / valid_batches if valid_batches > 0 else float('inf')}
 
 def analyze_token_distribution(model: QuantumLLM, stats_list: List[TokenStats]):
@@ -1022,16 +979,30 @@ def analyze_epoch_distribution(model: QuantumLLM, token_dist: Counter, epoch: in
     entropy_ratio = (entropy / max_entropy) * 100
     print(f"Distribution Entropy: {entropy:.2f} bits ({entropy_ratio:.2f}% of maximum)")
 
-def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, temperature: float = 0.7) -> str:
-    """Generate text using the quantum language model with live updating output"""
+def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, 
+                 temperature: float = 0.7, nucleus_threshold: float = 0.9) -> str:
+    """Generate text using the quantum language model with improved sampling
+
+    Args:
+        model: The QuantumLLM model
+        prompt: Input text to continue from
+        max_length: Maximum number of tokens to generate
+        temperature: Controls randomness (higher = more random, lower = more focused)
+        nucleus_threshold: Controls diversity via nucleus sampling (0.1-0.99)
+                         Higher values include more low-probability tokens
+                         Lower values make text more focused but potentially repetitive
+
+    Returns:
+        str: Generated text including the prompt
+    """
     # Get device
-    device = next(model.parameters()).device  # Get device from model
+    device = next(model.parameters()).device
     
     # Ensure model is in eval mode
     model.eval()
     
     # Encode input without adding EOS token
-    input_ids = model.tokenizer.encode(prompt, add_special_tokens=True)
+    input_ids = model.tokenizer.encode(prompt, add_special_tokens=False)
     if not isinstance(input_ids, torch.Tensor):
         input_ids = torch.tensor(input_ids)
     input_ids = input_ids.unsqueeze(0).to(device)
@@ -1039,6 +1010,9 @@ def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, tempera
     if DEBUG_MODE:
         print(f"\nInput Debug:")
         print(f"Input tokens: {input_ids.tolist()}")
+        print(f"Generation settings:")
+        print(f"- Temperature: {temperature}")
+        print(f"- Nucleus threshold: {nucleus_threshold}")
     
     with torch.no_grad():
         generated = input_ids
@@ -1050,47 +1024,79 @@ def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, tempera
         print(prompt, end='', flush=True)
         last_printed_length = len(prompt)
         
+        # Get special token IDs
+        eos_token_id = model.tokenizer.vocab.get(model.tokenizer.EOS_token, -1)
+        pad_token_id = model.tokenizer.vocab.get(model.tokenizer.PAD_token, -1)
+        special_tokens = [eos_token_id, pad_token_id]
+        
+        consecutive_special = 0  # Track consecutive special tokens
+        
         for i in range(max_length):
             try:
                 # Get model outputs
                 logits = model(generated)
                 next_token_logits = logits[:, -1, :] / temperature
                 
-                # Optional: Apply repetition penalty
+                # Apply repetition penalty
                 for token in generated_tokens[-5:]:
-                    next_token_logits[0, token] /= 1.2
+                    next_token_logits[0, token] /= 1.5  # Increased penalty
                 
                 # Get probabilities
                 probs = F.softmax(next_token_logits, dim=-1)
                 
-                # Filter out special tokens
-                special_tokens = [model.tokenizer.vocab[t] for t in 
-                                [model.tokenizer.PAD_token, model.tokenizer.EOS_token]
-                                if hasattr(model.tokenizer, t)]
-                for token in special_tokens:
-                    probs[0, token] = 0
+                # Prevent early EOS by reducing its probability early in generation
+                min_tokens = 10  # Minimum tokens to generate
+                if len(generated_tokens) < min_tokens:
+                    probs[0, eos_token_id] *= 0.1  # Reduce EOS probability early on
+                
+                # Filter out special tokens early in generation
+                if len(generated_tokens) < min_tokens:
+                    for token_id in special_tokens:
+                        probs[0, token_id] *= 0.1
+                
+                # Enhance probability of non-special tokens
+                special_mask = torch.ones_like(probs)
+                for token_id in special_tokens:
+                    special_mask[0, token_id] = 0.1
+                probs = probs * special_mask
                 
                 # Renormalize probabilities
                 probs = probs / probs.sum()
                 
-                # Sample next token
-                next_token = torch.multinomial(probs, num_samples=1)
-                token_value = next_token.item()
-                generated_tokens.append(token_value)
+                # Sample next token with nucleus sampling using provided threshold
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
+                nucleus_mask = cumsum_probs < nucleus_threshold
+                nucleus_mask[..., 1:] = nucleus_mask[..., :-1].clone()
+                nucleus_mask[..., 0] = True  # Always keep the top token
                 
-                # Check for stopping conditions
-                if token_value == model.tokenizer.vocab.get(model.tokenizer.EOS_token, -1):
+                # Apply nucleus sampling
+                sorted_probs[~nucleus_mask] = 0.0
+                sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+                
+                # Sample from filtered distribution
+                next_token = torch.multinomial(sorted_probs, num_samples=1)
+                next_token = sorted_indices[0, next_token[0]]
+                
+                if DEBUG_MODE and i < 5:  # Show first few tokens for debugging
+                    token_text = model.tokenizer.decode([next_token.item()], skip_special_tokens=True)
+                    print(f"\nToken {i}: {token_text} (id: {next_token.item()}, prob: {probs[0, next_token.item()]:.4f})")
+                
+                # Track consecutive special tokens
+                if next_token.item() in special_tokens:
+                    consecutive_special += 1
+                else:
+                    consecutive_special = 0
+                
+                # Stop if too many consecutive special tokens
+                if consecutive_special >= 3:
                     if DEBUG_MODE:
-                        print("\nEOS token generated, stopping")
-                    break
-                    
-                if len(generated_tokens) >= max_length:
-                    if DEBUG_MODE:
-                        print("\nMax length reached, stopping")
+                        print("\nStopping due to consecutive special tokens")
                     break
                 
-                # Append and continue
-                generated = torch.cat([generated, next_token], dim=1)
+                # Add token to generated sequence
+                generated_tokens.append(next_token.item())
+                generated = torch.cat([generated, next_token.unsqueeze(0)], dim=1)
                 
                 # Get current text and print only the new part
                 current_text = model.tokenizer.decode(generated[0].cpu(), skip_special_tokens=True)
@@ -1113,6 +1119,7 @@ def generate_text(model: QuantumLLM, prompt: str, max_length: int = 100, tempera
                 print(f"\nFinal Debug:")
                 print(f"Generated tokens: {generated_tokens}")
                 print(f"Final tensor shape: {generated.shape}")
+                print(f"Total tokens generated: {len(generated_tokens)}")
             return result
         except Exception as e:
             print(f"Error during final decoding: {str(e)}")
@@ -1229,6 +1236,8 @@ def main(args):
                       help='Sampling temperature')
     parser.add_argument('--checkpoint', type=str, default=None,
                       help='Specific checkpoint to load')
+    parser.add_argument('--nucleus_threshold', type=float, default=0.9,
+                      help='Nucleus sampling threshold (0.1-0.99)')
     
     args = parser.parse_args()
     
@@ -1277,7 +1286,8 @@ def main(args):
             model,
             args.prompt,
             max_length=args.max_length,
-            temperature=args.temperature
+            temperature=args.temperature,
+            nucleus_threshold=args.nucleus_threshold
         )
         print(f"\nGenerated text: '{generated_text}'")
 

@@ -683,58 +683,55 @@ def compute_enhanced_quantum_loss(
     targets: torch.Tensor,
     pad_token_id: int
 ) -> torch.Tensor:
-    """Optimized quantum loss computation with device flexibility"""
+    """Enhanced quantum loss computation with better gradient flow"""
     device = logits.device
     
-    # Compute cross entropy efficiently
+    # Compute cross entropy with label smoothing
     ce_loss = F.cross_entropy(
         logits.view(-1, logits.size(-1)),
         targets.view(-1),
         ignore_index=pad_token_id,
-        reduction='mean'
+        reduction='mean',
+        label_smoothing=0.1  # Add label smoothing
     )
     
-    # Fast probability computation using native autocast
-    with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=True):
-        log_probs = F.log_softmax(logits, dim=-1)
-        probs = torch.exp(log_probs)
+    # Get probabilities
+    probs = F.softmax(logits, dim=-1)
+    log_probs = F.log_softmax(logits, dim=-1)
     
-    # Efficient pad penalty
-    pad_probs = probs[..., pad_token_id]
-    pad_penalty = torch.mean(pad_probs.pow(2)) * 10.0
-    
-    # Fast token diversity using log probabilities
+    # Enhanced token diversity loss
     token_dist = probs.mean(dim=[0, 1])
-    diversity_loss = -(token_dist * log_probs.mean(dim=[0, 1])).sum()
+    target_dist = torch.ones_like(token_dist) / token_dist.size(0)
+    diversity_loss = F.kl_div(
+        token_dist.log(), 
+        target_dist, 
+        reduction='batchmean'
+    )
     
-    # Optimized coherence calculation without complex numbers
+    # Compute coherence loss
     B, L, V = logits.shape
-    coherence_loss = torch.tensor(0.0, device=device)
+    coherence_loss = torch.tensor(0.0, device=device, requires_grad=True)
     
-    if L > 1:  # Only compute coherence if sequence length > 1
-        # Ensure the split is even
+    if L > 1:
         V_half = V // 2
         real = logits[..., :V_half]
         imag = logits[..., V_half:V_half*2]
         
-        # Make sure real and imag have the same size
-        min_size = min(real.size(-1), imag.size(-1))
-        real = real[..., :min_size]
-        imag = imag[..., :min_size]
-        
-        # Compute phases using real and imaginary parts
+        # Enhanced phase coherence
         phases = torch.atan2(imag + 1e-8, real + 1e-8)
-        mean_phase = phases.mean(dim=1, keepdim=True)
-        phase_diffs = (phases - mean_phase).abs().mean()
-        coherence_loss = -torch.cos(phase_diffs)
+        phase_diffs = phases[:, 1:] - phases[:, :-1]
+        coherence_loss = 1 - torch.cos(phase_diffs).mean()
     
-    # Combine losses with adjusted weights
+    # Combine losses with dynamic weighting
     total_loss = (
         ce_loss +
-        pad_penalty +
-        0.1 * coherence_loss +
-        0.05 * (1.0 - torch.clamp(diversity_loss, 0.0, 0.5))
+        0.2 * coherence_loss +  # Increased weight
+        0.1 * diversity_loss    # Increased weight
     )
+    
+    # Add L2 regularization
+    l2_reg = sum(p.pow(2.0).sum() for p in model.parameters()) * 0.0001
+    total_loss = total_loss + l2_reg
     
     return total_loss
 
@@ -875,39 +872,65 @@ class QuantumLLM(nn.Module):
             # Get embeddings
             real_embed, imag_embed = self.embedding(x)
             
-            # Process through phase space
+            # Scale embeddings for better gradient flow
+            real_embed = real_embed * 0.1
+            imag_embed = imag_embed * 0.1
+            
+            # Get PAD token ID
             pad_token_id = self.tokenizer.vocab[self.tokenizer.PAD_token]
+            
+            # Process through phase space with gradient tracking
             real, imag = self.phase_space(real_embed, pad_token_id)
             
             # Create padding mask
             pad_mask = (x == pad_token_id)
             
-            # Process through layers with memory optimization
+            # Add skip connection from embeddings
+            real = real + real_embed * 0.1
+            imag = imag + imag_embed * 0.1
+            
+            # Process through layers with gradient accumulation
+            layer_outputs = []
             for layer in self.layers:
-                if self.use_memory_efficient_attention:
-                    real, imag = layer['attention']._memory_efficient_forward(
-                        real.unsqueeze(1), imag.unsqueeze(1),
-                        real.unsqueeze(1), imag.unsqueeze(1),
-                        real.unsqueeze(1), imag.unsqueeze(1),
-                        pad_mask
-                    )
-                    real, imag = real.squeeze(1), imag.squeeze(1)
-                else:
-                    real, imag = layer['attention'](
-                        real, imag, real, imag, real, imag,
-                        pad_mask=pad_mask
-                    )
+                real_out, imag_out = layer['attention']._memory_efficient_forward(
+                    real.unsqueeze(1), imag.unsqueeze(1),
+                    real.unsqueeze(1), imag.unsqueeze(1),
+                    real.unsqueeze(1), imag.unsqueeze(1),
+                    pad_mask
+                )
+                real_out, imag_out = real_out.squeeze(1), imag_out.squeeze(1)
                 
                 # Apply normalization
-                real = layer['phase_norm'](real)
-                imag = layer['phase_norm'](imag)
+                real_out = layer['phase_norm'](real_out)
+                imag_out = layer['phase_norm'](imag_out)
                 
                 # Clear intermediate tensors
                 torch.cuda.empty_cache() if x.device.type == 'cuda' else None
+                
+                # Add skip connection from embeddings
+                real_out = real_out + real_embed * 0.1
+                imag_out = imag_out + imag_embed * 0.1
+                
+                layer_outputs.append((real_out, imag_out))
+                real, imag = real_out, imag_out
             
-            # Final output computation
-            combined = self.pre_output_norm(torch.cat([real, imag], dim=-1))
-            return self.output(combined)
+            # Combine outputs with residual connections
+            final_real = sum(out[0] for out in layer_outputs) / len(self.layers)
+            final_imag = sum(out[1] for out in layer_outputs) / len(self.layers)
+            
+            # Combine for output with scaling
+            combined = torch.cat([final_real, final_imag], dim=-1)
+            combined = self.pre_output_norm(combined)
+            
+            # Add a small amount of noise during training for exploration
+            if self.training:
+                noise = torch.randn_like(combined) * 0.01
+                combined = combined + noise
+            
+            # Final output projection
+            logits = self.output(combined)
+            
+            return logits
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Configure memory settings for device
@@ -981,31 +1004,19 @@ class EnhancedDynamicPhaseSpace(nn.Module):
         return new_real, new_imag
     
     def forward(self, x: torch.Tensor, pad_token_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Get base quantum state
+        # Get base quantum state with gradient tracking
         real, imag = self.quantum_state(x)
         
         # Detect potential collapse states
         amplitude = torch.sqrt(real.pow(2) + imag.pow(2) + 1e-8)
         collapse_mask = (amplitude < 0.1).float()
         
-        # Apply excitation to prevent collapse
-        excitation_real, excitation_imag = self._compute_excitation(collapse_mask)
-        real = real + excitation_real
-        imag = imag + excitation_imag
+        # Add excitation with better gradient flow
+        excitation = torch.exp(self.energy_levels) * torch.sigmoid(self.excitation_factor)
+        real = real + collapse_mask * excitation.unsqueeze(0).unsqueeze(0)
+        imag = imag + collapse_mask * excitation.unsqueeze(0).unsqueeze(0)
         
-        # Apply phase preservation
-        real, imag = self._apply_phase_preservation(real, imag)
-        
-        # Apply quantum coherence preservation
-        real, imag = self.coherence_layer(real, imag)
-        
-        # Handle padding
-        if pad_token_id is not None:
-            pad_mask = (x == pad_token_id).unsqueeze(-1)
-            real = real.masked_fill(pad_mask, 0.0)
-            imag = imag.masked_fill(pad_mask, 0.0)
-        
-        # Final normalization while preserving phase relationships
+        # Normalize while preserving gradients
         norm = torch.sqrt(real.pow(2) + imag.pow(2) + 1e-8)
         real = real / norm
         imag = imag / norm
@@ -1031,22 +1042,44 @@ class QuantumStatePreservingAttention(BasicQuantumAttention):
                 v_real: torch.Tensor, v_imag: torch.Tensor,
                 pad_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         
-        # Get base attention outputs using parent class
-        out_real, out_imag = super().forward(q_real, q_imag, k_real, k_imag, v_real, v_imag, pad_mask)
+        # Remove retain_grad calls as they're not needed
+        # Apply layer normalization
+        q_real, q_imag = self.q_norm(q_real), self.q_norm(q_imag)
+        k_real, k_imag = self.k_norm(k_real), self.k_norm(k_imag)
+        v_real, v_imag = self.v_norm(v_real), self.v_norm(v_imag)
         
-        # Fast phase computation using lookup
-        phase_indices = ((torch.atan2(out_imag + 1e-8, out_real + 1e-8) + math.pi) 
-                        / (2*math.pi) * self.trig.resolution).long()
+        # Compute attention scores
+        scores_real = torch.matmul(q_real, k_real.transpose(-2, -1)) - \
+                     torch.matmul(q_imag, k_imag.transpose(-2, -1))
+        scores_imag = torch.matmul(q_real, k_imag.transpose(-2, -1)) + \
+                     torch.matmul(q_imag, k_real.transpose(-2, -1))
         
-        # Apply phase preservation using pre-computed values
+        # Scale scores
+        scores_real = scores_real * self.scale
+        scores_imag = scores_imag * self.scale
+        
+        # Apply padding mask if provided
+        if pad_mask is not None:
+            scores_real = scores_real.masked_fill(pad_mask.unsqueeze(1), float('-inf'))
+            scores_imag = scores_imag.masked_fill(pad_mask.unsqueeze(1), 0.0)
+        
+        # Compute attention weights with stable softmax
+        weights = F.softmax(scores_real, dim=-1)
+        
+        # Apply attention
+        out_real = torch.matmul(weights, v_real)
+        out_imag = torch.matmul(weights, v_imag)
+        
+        # Apply phase preservation
+        phase = torch.atan2(out_imag + 1e-8, out_real + 1e-8)
         preservation = torch.sigmoid(self.phase_preservation)
-        preserved_real = out_real * self.preservation_phases[phase_indices, 0]
-        preserved_imag = out_imag * self.preservation_phases[phase_indices, 1]
         
-        # Fast normalization
-        norm = torch.rsqrt(preserved_real.pow(2) + preserved_imag.pow(2) + 1e-8)
-        preserved_real = preserved_real * norm
-        preserved_imag = preserved_imag * norm
+        preserved_real = out_real * torch.cos(phase * preservation.unsqueeze(0).unsqueeze(0))
+        preserved_imag = out_imag * torch.sin(phase * preservation.unsqueeze(0).unsqueeze(0))
+        
+        # Add residual connection with scaling
+        preserved_real = preserved_real + q_real * 0.1
+        preserved_imag = preserved_imag + q_imag * 0.1
         
         return preserved_real, preserved_imag
 
@@ -1195,32 +1228,44 @@ class MemoryEfficientQuantumLLM(QuantumLLM):
         # Get quantum embeddings
         real_embed, imag_embed = self.embedding(x)
         
-        # Get PAD token ID for collapse prevention
+        # Scale embeddings for better gradient flow
+        real_embed = real_embed * 0.1
+        imag_embed = imag_embed * 0.1
+        
+        # Get PAD token ID
         pad_token_id = self.tokenizer.vocab[self.tokenizer.PAD_token]
         
-        # Process through enhanced phase space
+        # Process through phase space with gradient tracking
         real, imag = self.phase_space(real_embed, pad_token_id)
         
-        # Create padding mask for attention
+        # Create padding mask
         pad_mask = (x == pad_token_id)
         
-        # Process through reversible layers
+        # Add skip connection from embeddings
+        real = real + real_embed * 0.1
+        imag = imag + imag_embed * 0.1
+        
+        # Process through layers with gradient accumulation
+        layer_outputs = []
         for layer in self.layers:
-            real, imag = layer(real, imag, pad_mask=pad_mask)
+            real_out, imag_out = layer(real, imag, pad_mask=pad_mask)
+            layer_outputs.append((real_out, imag_out))
+            real, imag = real_out, imag_out
         
-        # Combine for output
-        combined = torch.cat([real, imag], dim=-1)
+        # Combine outputs with residual connections
+        final_real = sum(out[0] for out in layer_outputs) / len(self.layers)
+        final_imag = sum(out[1] for out in layer_outputs) / len(self.layers)
+        
+        # Combine for output with scaling
+        combined = torch.cat([final_real, final_imag], dim=-1)
         combined = self.pre_output_norm(combined)
-        logits = self.output(combined)
         
-        # Apply token distribution regulation during training
+        # Add a small amount of noise during training for exploration
         if self.training:
-            target_ids = torch.roll(x, shifts=-1, dims=-1)
-            seq_lengths = torch.argmax(pad_mask.float(), dim=1)
-            for idx, length in enumerate(seq_lengths):
-                if length == 0:
-                    length = x.size(1) - 1
-                target_ids[idx, length] = self.tokenizer.vocab[self.tokenizer.EOS_token]
-            logits = self.token_regulator.update_distribution(logits, target_ids)
+            noise = torch.randn_like(combined) * 0.01
+            combined = combined + noise
+        
+        # Final output projection
+        logits = self.output(combined)
         
         return logits
